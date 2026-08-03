@@ -83,6 +83,7 @@ def test_p1_duplex_loop_help_documents_repeatable_benchmarking():
     )
     assert result.returncode == 0
     assert "--repeat" in result.stdout
+    assert "--queued-runtime" in result.stdout
 
 
 def test_p1_duplex_loop_rejects_empty_benchmark_batch():

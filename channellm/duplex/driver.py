@@ -52,11 +52,15 @@ class DuplexPipelineDriver:
 
     def begin_turn(self, speech_id: str = "") -> EpochTag:
         """开始输入回合，并同步清除上一回合的 TTS/vocoder 状态。"""
+        tag = self.runtime.begin_turn(speech_id)
+        self.reset_for_turn(tag)
+        return tag
+
+    def reset_for_turn(self, tag: EpochTag) -> None:
+        """在模型 worker 中切换到已经由 runtime 建立的回合。"""
         self.talker_stream.reset()
         self.code2wav.stream_reset()
-        tag = self.runtime.begin_turn(speech_id)
         self._discard_stale_queued_work(tag)
-        return tag
 
     def on_eou(self, tag: EpochTag) -> bool:
         """记录外部 EOU 观测；说话权仍由 duplex 模型输出决定。"""

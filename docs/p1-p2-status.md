@@ -19,7 +19,7 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 | L1 引擎 | `engine/code2wav.py` Token2wav 封装 + StreamingSynth 分块流式 | ✅ 批量+流式双路径 |
 | L1 引擎 | `engine/audio_front.py` 官方流式 whisper 编码器混合封装 | ✅ 音频理解验证 |
 | L2 编排 | `pipeline/orchestrator.py` + `pipeline/transport.py` | ✅ 增量路由、有界队列、旧 epoch 清理 |
-| L3 控制 | `duplex/runtime.py` + `duplex/driver.py` + `duplex/playback.py` | ✅ 真实三阶段驱动、cancel-not-await、待播 PCM 静音、播放生命周期 |
+| L3 控制 | `duplex/runtime.py` + `duplex/driver.py` + `duplex/queued_runtime.py` + `duplex/playback.py` | ✅ 真实三阶段驱动、单 GPU 有界 worker、cancel-not-await、待播 PCM 静音、播放生命周期 |
 | L3 EOU 基准 | `duplex/eou_baseline.py` | ✅ 可注入 SoulX 官方状态流；⚠️ 当前 venv 未混入 SoulX 依赖，待独立官方服务/引擎部署实测 |
 
 ## 验证证据
@@ -47,7 +47,14 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    取走的旧 PCM；只有 writer 明确报告播放结束后，下一输入才不会触发 mute。
    `AgentSpeechActuallyPlayed` 也只在 writer 首次取走 PCM 时写入 SQLite，绝不把
    “仅发布到待播缓冲、随后被 barge-in 丢弃”的音频伪装成已播放事实。
-7. **独立 EOU 适配**:SoulX-Duplug 只把官方 `state == "speak"` 映射为独立 EOU
+7. **输入线程不等待旧模型**:新的 `QueuedDuplexRuntime` 把 GPU 模型调用移入单
+   worker 有界队列；新输入会先推进 epoch/cancel/mute，已在运行的旧调用可自然返回，
+   其输出因旧 tag 被 runtime 拒绝。测试以阻塞的旧模型调用验证新回合控制面在 50ms
+   内返回，并验证未启动旧音频和队满时最旧输入均不进入模型。真实权重
+   `p1_duplex_loop.py --queued-runtime` 也已产生完整 PCM/trace 并通过信号门禁；
+   该脚本以机器速度灌入输入，故它的 2439.3ms EOU→首 PCM 只证明队列正确性，
+   不可作为实时 SLO。
+8. **独立 EOU 适配**:SoulX-Duplug 只把官方 `state == "speak"` 映射为独立 EOU
    观测，且官方状态流未提供置信度时保留为未知；该观测不进入 MiniCPM-o 的说话
    决策。当前项目 venv 缺少 SoulX 官方推理依赖，因而仅验证注入契约，未伪称模型
    已共驻运行。

@@ -67,6 +67,11 @@ def main() -> int:
             "多轮时为每轮生成唯一 trace/WAV，避免把旧样本混入统计。"
         ),
     )
+    parser.add_argument(
+        "--queued-runtime",
+        action="store_true",
+        help="用单 GPU worker 队列处理输入，验证 barge-in 不阻塞输入控制面。",
+    )
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat 必须至少为 1")
@@ -147,6 +152,7 @@ def main() -> int:
 
     from channellm.duplex.driver import DuplexPipelineDriver
     from channellm.duplex.playback import BufferedPlaybackSink
+    from channellm.duplex.queued_runtime import QueuedDuplexRuntime
     from channellm.duplex.runtime import RealtimeRuntime
     from channellm.metrics.latency import format_waterfall, waterfall
     from channellm.pipeline.orchestrator import Orchestrator
@@ -195,10 +201,18 @@ def main() -> int:
         ) as recorder:
             runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
             driver = DuplexPipelineDriver(runtime, session, talker_stream, code2wav)
-            tag = driver.begin_turn("local-replay")
+            queued = QueuedDuplexRuntime(driver) if args.queued_runtime else None
+            tag = (
+                queued.begin_turn("local-replay")
+                if queued is not None
+                else driver.begin_turn("local-replay")
+            )
             while pos < len(stream):
                 if not eou_marked and pos >= len(wave):
-                    driver.on_eou(tag)
+                    if queued is not None:
+                        queued.on_eou(tag)
+                    else:
+                        driver.on_eou(tag)
                     eou_marked = True
                 n = proc.get_streaming_chunk_size()
                 piece = stream[pos : pos + n]
@@ -206,6 +220,12 @@ def main() -> int:
                     piece = np.concatenate(
                         [piece, np.zeros(n - len(piece), dtype=np.float32)]
                     )
+                if queued is not None:
+                    if not queued.submit_audio(tag, piece):
+                        break
+                    pos += n
+                    idx += 1
+                    continue
                 decision = driver.process_audio_chunk(tag, piece)
                 if decision is None:
                     break
@@ -226,7 +246,20 @@ def main() -> int:
                 if runtime.active_tag is None:
                     break
             if not eou_marked:
-                driver.on_eou(tag)
+                if queued is not None:
+                    queued.on_eou(tag)
+                else:
+                    driver.on_eou(tag)
+            if queued is not None:
+                if not queued.wait_idle(30.0):
+                    queued.close()
+                    raise TimeoutError("queued duplex runtime did not become idle in 30s")
+                if queued.failures:
+                    raise RuntimeError("queued duplex runtime worker failed") from (
+                        queued.failures[0]
+                    )
+                if not queued.close():
+                    raise RuntimeError("queued duplex runtime did not stop")
             played = sink.drain()
             if played:
                 runtime.on_device_playout_start(played[0][1])
@@ -240,11 +273,14 @@ def main() -> int:
             for i, decision in enumerate(decisions)
             if decision.cost_embed_ms + decision.cost_decision_ms > 1000
         ]
-        print(
-            f"[loop] {idx} chunks / {loop_s:.2f}s, "
-            f"listen={n_listen} speak={idx - n_listen}"
-        )
-        print(f"[loop] 超 1s 实时预算的 chunk: {over if over else '无'}")
+        if args.queued_runtime:
+            print(f"[loop] {idx} queued chunks / {loop_s:.2f}s")
+        else:
+            print(
+                f"[loop] {idx} chunks / {loop_s:.2f}s, "
+                f"listen={n_listen} speak={idx - n_listen}"
+            )
+            print(f"[loop] 超 1s 实时预算的 chunk: {over if over else '无'}")
 
         reply_text = audio_front.tokenizer.decode(
             session.res_ids, skip_special_tokens=True
