@@ -34,19 +34,6 @@ DEFAULT_WAV = (
 REF_WAV_SUFFIX = Path("assets") / "HT_ref_audio.wav"
 
 
-class CollectingSink:
-    """本地回放接收器；生产媒体层需实现同一 PlaybackSink 契约。"""
-
-    def __init__(self) -> None:
-        self.parts: list[np.ndarray] = []
-
-    def mute(self) -> None:
-        self.parts.clear()
-
-    def publish(self, pcm, _tag) -> None:
-        self.parts.append(np.asarray(pcm, dtype=np.float32).reshape(-1).copy())
-
-
 def find_snapshot() -> Path:
     snaps = sorted(SNAPSHOT_GLOB.glob("*/"))
     if not snaps:
@@ -144,13 +131,14 @@ def main() -> int:
     stream = np.concatenate([wave, tail])
 
     from channellm.duplex.driver import DuplexPipelineDriver
+    from channellm.duplex.playback import BufferedPlaybackSink
     from channellm.duplex.runtime import RealtimeRuntime
     from channellm.engine.blocks import TorchListKV
     from channellm.metrics.latency import format_waterfall, waterfall
     from channellm.pipeline.orchestrator import Orchestrator
     from channellm.tracing import TraceRecorder, load_records
 
-    sink = CollectingSink()
+    sink = BufferedPlaybackSink()
     talker_stream = TalkerStream(talker, TorchListKV)
     args.trace.parent.mkdir(parents=True, exist_ok=True)
     proc = audio_front.model.processor
@@ -189,6 +177,9 @@ def main() -> int:
                 break
         if not eou_marked:
             driver.on_eou(tag)
+        played = sink.drain()
+        if played:
+            runtime.on_device_playout_start(played[0][1])
     torch.cuda.synchronize()
     loop_s = time.monotonic() - t0
     n_listen = sum(1 for d in decisions if d.is_listen)
@@ -201,7 +192,11 @@ def main() -> int:
     reply_text = tok.decode(session.res_ids, skip_special_tokens=True)
     print(f"[reply] {reply_text[:300]!r}")
 
-    wav = np.concatenate(sink.parts) if sink.parts else np.zeros(0, dtype=np.float32)
+    wav = (
+        np.concatenate([np.asarray(pcm, dtype=np.float32).reshape(-1) for pcm, _tag in played])
+        if played
+        else np.zeros(0, dtype=np.float32)
+    )
     records = load_records(args.trace)
     print(format_waterfall(waterfall(records)))
 
@@ -216,7 +211,7 @@ def main() -> int:
         f"clip={quality.clipped_ratio:.6f})"
     )
     spoke = bool(session.res_ids)
-    ok = spoke and bool(sink.parts) and not failures
+    ok = spoke and bool(played) and not failures
     detail = "; ".join(failures) if failures else "signal-integrity gate passed"
     print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke}; {detail}")
     return 0 if ok else 1

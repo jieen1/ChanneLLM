@@ -62,6 +62,7 @@ class RealtimeRuntime:
         self.state_machine = SessionStateMachine()
         self._active: _ActiveTurn | None = None
         self._cancelled_request_ids: list[str] = []
+        self._playout_traces: dict[EpochTag, str] = {}
 
     @property
     def active_tag(self) -> EpochTag | None:
@@ -77,6 +78,7 @@ class RealtimeRuntime:
             self._cancelled_request_ids.append(previous.request_id)
             self.sink.mute()
             self._anchor(Anchor.PLAYOUT_MUTED, previous.tag, previous.trace_id)
+            self._playout_traces.pop(previous.tag, None)
 
         tag = self.epoch_guard.advance(speech_id)
         request_id = new_request_id()
@@ -107,6 +109,19 @@ class RealtimeRuntime:
             return False
         self.state_machine.on_eou()
         self._anchor(Anchor.EOU_DETECTED, active.tag, active.trace_id)
+        return True
+
+    def on_device_playout_start(self, tag: EpochTag) -> bool:
+        """由媒体 writer 在设备/下行真正取走首块 PCM 时调用。
+
+        即使回复 stage 已结束，最新 epoch 的已发布 PCM 仍可被设备播放；因此
+        trace id 独立保存，不依赖仍存在的 ``_active`` 请求。被 barge-in 作废
+        的 tag 会在 ``begin_turn`` 被移除，不能留下虚假的设备播放锚点。
+        """
+        trace_id = self._playout_traces.get(tag)
+        if trace_id is None or not self._is_current(tag):
+            return False
+        self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
         return True
 
     def submit_stage_output(
@@ -171,6 +186,7 @@ class RealtimeRuntime:
             return
         if not active.planned:
             active.planned = True
+            self._playout_traces[active.tag] = active.trace_id
             self.state_machine.on_speak_start()
             self._event(EventKind.AGENT_SPEECH_PLANNED, active)
             self._anchor(Anchor.CODE2WAV_FIRST_PCM, active.tag, active.trace_id)

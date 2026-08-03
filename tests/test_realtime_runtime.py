@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from channellm.app.event_store import EventKind, EventStore
 from channellm.duplex.epoch import EpochTag
+from channellm.duplex.playback import BufferedPlaybackSink
 from channellm.duplex.runtime import RealtimeRuntime
 from channellm.duplex.session import TurnPhase
 from channellm.metrics.latency import waterfall
@@ -298,3 +299,24 @@ def test_trace_pairing_does_not_cross_turns_after_barge_in(tmp_path):
     assert [(record.turn_epoch, record.speech_id) for record in pcm_records] == [
         (new_tag.turn_epoch, new_tag.speech_id)
     ]
+
+
+def test_media_playout_anchor_survives_reply_cleanup_but_not_barge_in(tmp_path):
+    trace_path = tmp_path / "runtime.jsonl"
+    sink = BufferedPlaybackSink()
+    with TraceRecorder(trace_path) as recorder:
+        runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
+        tag = runtime.begin_turn("speech-finished")
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm")
+        assert runtime.finish_turn(tag)
+        assert runtime.on_device_playout_start(tag)
+        assert sink.drain() == [(b"pcm", tag)]
+
+        old_tag = runtime.begin_turn("speech-old")
+        runtime.submit_stage_output(old_tag, StageId.CODE2WAV, b"old-pcm")
+        runtime.begin_turn("speech-new")
+        assert not runtime.on_device_playout_start(old_tag)
+
+    anchors = [record.anchor for record in load_records(trace_path)]
+    assert anchors.count(Anchor.DEVICE_PLAYOUT_START) == 1
+    assert sink.muted_items == 1
