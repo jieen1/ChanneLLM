@@ -32,8 +32,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
    → DEVICE_PLAYOUT_START` 完整 trace。最新一次 GPU 运行输出 24kHz / 2.000s，
-   RMS 0.067649、峰值 0.445831、零削波；该门禁只证明信号完整性，不证明可懂度
-   或主观自然度。
+   RMS 0.068862、峰值 0.445496、零削波、直流偏置 -0.000018、最大相邻采样步长
+   0.120422；门禁会拒绝空音、非有限值、削波、明显直流偏置和采样突变。它只证明
+   信号完整性，不证明可懂度或主观自然度，必须保留回放样本供人工评审。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
 6. **待播残音回归**:即使模型请求已完成，新输入也会清空尚未由媒体 writer

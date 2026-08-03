@@ -209,7 +209,8 @@ def main() -> int:
     failures = quality.failures()
     print(
         f"[done] 已写入 {args.out} (rms={quality.rms:.4f}, peak={quality.peak:.4f}, "
-        f"clip={quality.clipped_ratio:.6f})"
+        f"clip={quality.clipped_ratio:.6f}, dc={quality.dc_offset:.5f}, "
+        f"max-step={quality.max_step:.5f})"
     )
     spoke = bool(session.res_ids)
     ok = spoke and bool(played) and not failures
