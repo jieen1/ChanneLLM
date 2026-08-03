@@ -191,6 +191,7 @@ def main() -> int:
             run_trace,
             session_id=f"p2-local-replay-{batch_id or 'single'}-{run_number}",
             tags={"loc": "local", "temp": temperature, "run": str(run_number)},
+            append=False,
         ) as recorder:
             runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
             driver = DuplexPipelineDriver(runtime, session, talker_stream, code2wav)

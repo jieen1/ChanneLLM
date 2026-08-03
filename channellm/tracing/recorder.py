@@ -26,13 +26,15 @@ class TraceRecorder:
         out_path: str | Path,
         session_id: str = "",
         tags: dict[str, str] | None = None,
+        *,
+        append: bool = True,
     ) -> None:
         self.out_path = Path(out_path)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self.session_id = session_id
         self.base_tags = dict(tags or {})
         self._lock = threading.Lock()
-        self._fh = open(self.out_path, "a", encoding="utf-8")
+        self._fh = open(self.out_path, "a" if append else "w", encoding="utf-8")
         self._closed = False
 
     def new_trace(self) -> str:

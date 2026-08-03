@@ -34,6 +34,8 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
    → DEVICE_PLAYOUT_START` 完整 trace。`--repeat 3` 现以一次模型加载后的首轮为
    cold、其余为 warm，并为每轮创建独立 artifact，避免既有 JSONL 污染分位数。
+   单轮指定的 trace 路径也会由该脚本覆盖写入；P0 等需要累积样本的 recorder
+   调用仍显式保持追加语义。
    最新一批的三条 24kHz WAV 均无非有限值/削波/直流偏置/采样突变，RMS 为
    0.0600–0.1215、峰值为 0.5120–0.9900、最大相邻采样步长为 0.16568–0.43680。
    第三条有 13 个 sample ≥0.98（但没有 sample ≥0.999），因接近满幅而必须保留
