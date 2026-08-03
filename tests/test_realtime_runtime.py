@@ -199,6 +199,7 @@ def test_runtime_only_publishes_code2wav_pcm_not_interstage_codec(tmp_path):
 
         tag = runtime.begin_turn("speech-stream")
         runtime.on_eou(tag)
+        assert runtime.on_speak_decision(tag)
         talker_input = runtime.submit_stage_output(tag, StageId.THINKER, {"hidden": "h"})
         assert talker_input[0].stage is StageId.TALKER
 
@@ -215,6 +216,22 @@ def test_runtime_only_publishes_code2wav_pcm_not_interstage_codec(tmp_path):
     assert Anchor.TALKER_CHUNK_READY in anchors
 
 
+def test_runtime_records_speak_decision_before_talker_output_once(tmp_path):
+    trace_path = tmp_path / "runtime.jsonl"
+    with TraceRecorder(trace_path) as recorder:
+        runtime = RealtimeRuntime(Orchestrator(), FakeSink(), trace_recorder=recorder)
+        tag = runtime.begin_turn("speech-decision")
+        assert runtime.on_eou(tag)
+        assert runtime.on_speak_decision(tag)
+        assert runtime.on_speak_decision(tag)
+        runtime.submit_stage_output(tag, StageId.TALKER, [1] * 28)
+
+    anchors = [record.anchor for record in load_records(trace_path)]
+    assert anchors.count(Anchor.SPEAK_DECISION) == 1
+    assert anchors.count(Anchor.TALKER_CHUNK_READY) == 1
+    assert anchors.index(Anchor.SPEAK_DECISION) < anchors.index(Anchor.TALKER_CHUNK_READY)
+
+
 def test_runtime_routes_three_stages_and_records_a_single_first_pcm_anchor(tmp_path):
     trace_path = tmp_path / "runtime.jsonl"
     sink = FakeSink()
@@ -226,6 +243,7 @@ def test_runtime_routes_three_stages_and_records_a_single_first_pcm_anchor(tmp_p
         )
         tag = runtime.begin_turn("speech-three-stage")
         assert runtime.on_eou(tag)
+        assert runtime.on_speak_decision(tag)
 
         talker_input = runtime.submit_stage_output(tag, StageId.THINKER, {"hidden": "h"})
         assert len(talker_input) == 1

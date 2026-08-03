@@ -35,6 +35,7 @@ class _ActiveTurn:
     tag: EpochTag
     trace_id: str
     planned: bool = False
+    speak_decision: bool = False
     talker_chunk_ready: bool = False
     cleaned: bool = False
 
@@ -109,6 +110,21 @@ class RealtimeRuntime:
             return False
         self.state_machine.on_eou()
         self._anchor(Anchor.EOU_DETECTED, active.tag, active.trace_id)
+        return True
+
+    def on_speak_decision(self, tag: EpochTag) -> bool:
+        """记录 MiniCPM-o 首次决定开口的时刻。
+
+        这是 Thinker 已作出说话判断、尚未进入 Talker 生成的边界。不能借用
+        ``TALKER_CHUNK_READY`` 的时刻，否则会把 Talker 首块生成耗时伪装成
+        Thinker 决策耗时，污染 EOU waterfall。
+        """
+        active = self._active
+        if active is None or active.tag != tag or not self._is_current(tag):
+            return False
+        if not active.speak_decision:
+            active.speak_decision = True
+            self._anchor(Anchor.SPEAK_DECISION, tag, active.trace_id)
         return True
 
     def on_device_playout_start(self, tag: EpochTag) -> bool:
@@ -221,7 +237,6 @@ class RealtimeRuntime:
             and getattr(chunk, "payload", None) is not None
         ):
             active.talker_chunk_ready = True
-            self._anchor(Anchor.SPEAK_DECISION, active.tag, active.trace_id)
             self._anchor(Anchor.TALKER_CHUNK_READY, active.tag, active.trace_id)
 
     @staticmethod

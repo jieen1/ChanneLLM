@@ -33,8 +33,8 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
    → DEVICE_PLAYOUT_START` 完整 trace。2026-08-04 最新 GPU 回放输出 24kHz，
-   RMS 0.0868、峰值 0.5622、零削波、直流偏置 0.00000、最大相邻采样步长
-   0.14326；门禁会拒绝空音、非有限值、削波、明显直流偏置和采样突变。它只证明
+   RMS 0.0837、峰值 0.4570、零削波、直流偏置 -0.00008、最大相邻采样步长
+   0.13612；门禁会拒绝空音、非有限值、削波、明显直流偏置和采样突变。它只证明
    信号完整性，不证明可懂度或主观自然度，必须保留回放样本供人工评审。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
@@ -51,11 +51,13 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 
 | 段 | 耗时 | 1s 预算 |
 |---|---|---|
-| EOU → speak decision | 1908.3ms | ⚠️ 单样本，含仍待优化的 Thinker 决策 |
-| speak decision → 首 PCM | 291.7ms | ✅ 单样本本地 GPU 路径 |
-| EOU → 首 PCM | 2199.9ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
+| EOU → speak decision | 498.1ms | ⚠️ 单样本；现为 Thinker 首次决定开口的真实锚点 |
+| speak decision → 首 PCM | 1634.2ms | ⚠️ 单样本；包含 Talker 首块与首段 Code2Wav 路径 |
+| EOU → 首 PCM | 2132.3ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
 
-这些是 trace 实测，不可与其它轮次拼接，也不能代替 cold/warm、p50/p95/p99 报告。
+`speak decision` 与 `talker chunk ready` 已分离记录；过去把后者误作前者的单样本
+不再用于归因。以上仍只是 n=1 trace，不可与其它轮次拼接，也不能代替 cold/warm、
+p50/p95/p99 报告。
 
 ## decode 性能优化(本阶段成果)
 

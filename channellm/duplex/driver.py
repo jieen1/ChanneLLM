@@ -71,6 +71,11 @@ class DuplexPipelineDriver:
         if decision.is_listen or self.runtime.active_tag != tag:
             return decision
 
+        # Thinker 已经给出说话判断；在启动 Talker 前落锚，不能把 Talker
+        # 的首块生成耗时算进模型的 speak decision。
+        if not self.runtime.on_speak_decision(tag):
+            return decision
+
         token_ids, hidden_states = self.duplex_session.latest_unit_conditioning()
         unit = ThinkerUnit(token_ids, hidden_states, decision.end_of_turn)
         talker_inputs = self.runtime.submit_stage_output(tag, StageId.THINKER, unit)
