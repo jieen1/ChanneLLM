@@ -19,6 +19,9 @@ artifacts/p0/*
 !artifacts/p1/
 artifacts/p1/*
 !artifacts/p1/voice_loop_reply.wav
+!artifacts/p2/
+artifacts/p2/*
+!artifacts/p2/duplex_reply.wav
 logs/
 *.log
 traces/
@@ -29,6 +32,7 @@ traces/
 !tests/fixtures/**
 # 里程碑音频交付物(*.wav 全局规则的例外,必须在其后)
 !artifacts/p1/voice_loop_reply.wav
+!artifacts/p2/duplex_reply.wav
 
 # OMX / agent state
 .omx/
