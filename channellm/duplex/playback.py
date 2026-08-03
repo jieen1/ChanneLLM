@@ -106,7 +106,11 @@ class PcmPlayoutPump:
             pcm, tag = items[0]
             if not self.lifecycle.can_device_playout_start(tag):
                 continue
-            self.write(pcm, tag)
+            try:
+                self.write(pcm, tag)
+            except BaseException:
+                _clear_failed_handoff(self.sink, self.lifecycle, tag)
+                raise
             if not self.lifecycle.on_device_playout_start(tag):
                 continue
             written += 1
@@ -144,10 +148,24 @@ class AsyncPcmPlayoutPump:
             pcm, tag = items[0]
             if not self.lifecycle.can_device_playout_start(tag):
                 continue
-            await self.write(pcm, tag)
+            try:
+                await self.write(pcm, tag)
+            except BaseException:
+                _clear_failed_handoff(self.sink, self.lifecycle, tag)
+                raise
             if not self.lifecycle.on_device_playout_start(tag):
                 continue
             written += 1
             if self.sink.is_finished_and_drained(tag):
                 self.lifecycle.on_device_playout_finished(tag)
         return written
+
+
+def _clear_failed_handoff(
+    sink: BufferedPlaybackSink,
+    lifecycle: PlayoutLifecycle,
+    tag: EpochTag,
+) -> None:
+    """writer 失败时清理本地/远端待播，且不制造已播放事实。"""
+    sink.mute()
+    lifecycle.on_device_playout_finished(tag)

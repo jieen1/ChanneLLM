@@ -81,6 +81,8 @@ def test_writer_failure_does_not_record_played_fact(tmp_path) -> None:
         events = list(store.iterate())
 
     assert [event.kind for event in events] == [EventKind.AGENT_SPEECH_PLANNED.value]
+    assert sink.qsize() == 0
+    assert runtime.state_machine.reply.playout_tag is None
 
 
 def test_async_pump_records_playout_only_after_successful_handoff() -> None:
@@ -96,4 +98,21 @@ def test_async_pump_records_playout_only_after_successful_handoff() -> None:
 
     assert asyncio.run(AsyncPcmPlayoutPump(sink, runtime, write).pump()) == 1
     assert written == [b"pcm"]
+    assert runtime.state_machine.reply.playout_tag is None
+
+
+def test_async_writer_failure_clears_playout_state() -> None:
+    sink = BufferedPlaybackSink()
+    runtime = RealtimeRuntime(Orchestrator(), sink)
+    tag = runtime.begin_turn("async-writer-failure")
+    runtime.submit_stage_output(tag, stage=StageId.CODE2WAV, payload=b"pcm")
+    assert runtime.finish_turn(tag)
+
+    async def fail_write(_pcm: bytes, _tag: EpochTag) -> None:
+        raise OSError("transport unavailable")
+
+    with pytest.raises(OSError, match="transport unavailable"):
+        asyncio.run(AsyncPcmPlayoutPump(sink, runtime, fail_write).pump())
+
+    assert sink.qsize() == 0
     assert runtime.state_machine.reply.playout_tag is None
