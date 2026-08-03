@@ -28,6 +28,10 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    与官方 Qwen3 逐 token 一致(logits max|Δ|=4e-5);399/399 权重逐位一致;
    bf16 分歧为 ULP 舍入累积(层间 cos≥0.9997),非结构缺陷。
 2. **语音输出**:`artifacts/p1/voice_loop_reply.wav` 文本→15.9s 连续语音。
+   最近的完整自研三引擎回放(`post-runtime-voice-loop.wav`，提示“请用一句话
+   介绍杭州”)也生成 12.0s/24kHz PCM；RMS=0.08664、peak=0.66208、削波比例为零、
+   DC=-0.00002、最大采样步长=0.30704，无完整性失败或复核警告。该样本证明
+   Thinker→Talker→Code2Wav 共同加载和输出门禁，不证明语义与官方逐波形相同。
 3. **语音输入**:`scripts/p1_audio_in.py` 流式音频→自研 Thinker→准确复述
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
