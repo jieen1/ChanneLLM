@@ -42,7 +42,7 @@ class TalkerConfig:
     normalize_projected_hidden: bool = True
     audio_bos_token_id: int = 151687
     text_eos_token_id: int = 151692
-    codec_eos_token_id: int = 625
+    codec_eos_token_id: int = 6561  # 非流式 = num_audio_tokens-1;625 是 duplex 流式专用
     temperature: float = 0.8
     top_k: int = 25
     top_p: float = 0.85
@@ -65,6 +65,7 @@ class TalkerConfig:
             max_position_embeddings=tts["max_position_embeddings"],
             num_text_tokens=tts["num_text_tokens"],
             num_audio_tokens=tts["num_audio_tokens"],
+            codec_eos_token_id=tts["num_audio_tokens"] - 1,
             llm_dim=tts["llm_dim"],
             normalize_projected_hidden=tts.get("normalize_projected_hidden", True),
             audio_bos_token_id=tts["audio_bos_token_id"],
@@ -122,6 +123,19 @@ class TalkerAttention(nn.Module):
         return self.o_proj(out.reshape(seq_len, cfg.num_heads * cfg.head_dim))
 
 
+class TTSProjector(nn.Module):
+    """官方 MultiModalProjector 同构:linear1 -> ReLU -> linear2。"""
+
+    def __init__(self, in_dim: int, out_dim: int, device=None, dtype=None) -> None:
+        super().__init__()
+        self.linear1 = nn.Linear(in_dim, out_dim, bias=True, device=device, dtype=dtype)
+        self.relu = nn.ReLU()
+        self.linear2 = nn.Linear(out_dim, out_dim, bias=True, device=device, dtype=dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear2(self.relu(self.linear1(x)))
+
+
 class TalkerLayer(nn.Module):
     def __init__(self, config: TalkerConfig, device=None, dtype=None) -> None:
         super().__init__()
@@ -157,13 +171,7 @@ class Talker(nn.Module):
         self.emb_text = nn.Embedding(
             config.num_text_tokens, config.hidden_size, device=device, dtype=dtype
         )
-        self.projector_semantic = nn.Sequential(
-            nn.Linear(config.llm_dim, config.hidden_size, bias=True, device=device, dtype=dtype),
-            nn.ReLU(),
-            nn.Linear(
-                config.hidden_size, config.hidden_size, bias=True, device=device, dtype=dtype
-            ),
-        )
+        self.projector_semantic = TTSProjector(config.llm_dim, config.hidden_size, device, dtype)
         self.emb_code = nn.Embedding(
             config.num_audio_tokens, config.hidden_size, device=device, dtype=dtype
         )
@@ -234,37 +242,44 @@ class Talker(nn.Module):
         kv.commit()
         return self.norm(hidden)
 
+    def _get_warpers(self):
+        if getattr(self, "_warper_top_p", None) is None:
+            from transformers.generation.logits_process import (
+                TopKLogitsWarper,
+                TopPLogitsWarper,
+            )
+
+            self._warper_top_p = TopPLogitsWarper(self.config.top_p, min_tokens_to_keep=3)
+            self._warper_top_k = TopKLogitsWarper(self.config.top_k, min_tokens_to_keep=3)
+        return self._warper_top_p, self._warper_top_k
+
     def _sample_codec(
         self,
         logits: torch.Tensor,
         generated: list[int],
         generator: torch.Generator,
     ) -> int:
+        """官方非流式采样序列:temperature → 窗口 16 频次式重复惩罚 →
+        top_p → top_k → 前 min_new_tokens 步屏蔽 EOS → softmax → multinomial。"""
         cfg = self.config
-        scores = logits.float()
-        if generated and cfg.repetition_penalty != 1.0:
-            prev = torch.tensor(sorted(set(generated)), device=scores.device)
-            values = scores[prev]
-            values = torch.where(
-                values < 0, values * cfg.repetition_penalty, values / cfg.repetition_penalty
-            )
-            scores[prev] = values
-        if len(generated) < cfg.min_new_tokens:
-            scores[cfg.codec_eos_token_id] = float("-inf")
+        scores = logits.float().unsqueeze(0)
         scores = scores / cfg.temperature
-        if cfg.top_k > 0:
-            kth = torch.topk(scores, cfg.top_k).values[-1]
-            scores = scores.masked_fill(scores < kth, float("-inf"))
+        if generated:
+            input_ids = torch.tensor([generated], dtype=torch.long, device=scores.device)
+            if input_ids.size(1) > 16:
+                input_ids = input_ids.narrow(1, -16, 16)
+            freq = F.one_hot(input_ids, scores.size(1)).sum(1)
+            alpha = torch.pow(torch.tensor(cfg.repetition_penalty, device=scores.device), freq)
+            inp = scores * alpha
+            oth = scores / alpha
+            scores = torch.where(scores < 0, inp, oth)
+            top_p, top_k = self._get_warpers()
+            scores = top_p(input_ids, scores)
+            scores = top_k(input_ids, scores)
+        if len(generated) < cfg.min_new_tokens:
+            scores[:, cfg.codec_eos_token_id] = float("-inf")
         probs = F.softmax(scores, dim=-1)
-        if cfg.top_p < 1.0:
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumsum = sorted_probs.cumsum(0)
-            cutoff = cumsum > cfg.top_p
-            cutoff[0] = False
-            sorted_probs[cutoff] = 0.0
-            probs.zero_().scatter_(0, sorted_idx, sorted_probs)
-            probs = probs / probs.sum()
-        return int(torch.multinomial(probs, 1, generator=generator).item())
+        return int(torch.multinomial(probs, 1, generator=generator).view(-1).item())
 
     @torch.no_grad()
     def generate_codec_tokens(
@@ -364,8 +379,9 @@ def load_talker_weights(
                     del tensor
     if pending_g is None or pending_v is None:
         raise RuntimeError("head_code weight_norm g/v 未装齐")
-    fused = torch._weight_norm(pending_v, pending_g, dim=0)
-    model.head_code.weight.copy_(fused.to(dtype))
+    with torch.no_grad():
+        fused = torch._weight_norm(pending_v, pending_g, dim=0)
+        model.head_code.weight.copy_(fused.to(dtype))
     loaded += 1
 
     expected = len(state)
