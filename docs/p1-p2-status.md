@@ -41,6 +41,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    第五条有 6 个 sample ≥0.98（但没有 sample ≥0.999），因接近满幅而必须保留
    该 artifact 做人工试听。L1 Code2Wav 现在还会在 PCM 进入媒体层前拒绝非 24kHz
    WAV bytes 与非有限 sample；门禁只证明信号完整性，不证明可懂度或主观自然度。
+   随后的质量优先五轮复测（相同驻留模型进程）五条均通过硬门禁和人工复核门槛：
+   RMS 0.0621–0.1275、peak 0.3801–0.8851、最大相邻采样步长 0.18384–0.34772，
+   削波比均为零；此前的 near-full-scale artifact 仍保留，不能被这批结果抹除。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
 6. **待播残音回归**:即使模型请求已完成，新输入也会清空尚未由媒体 writer
@@ -66,16 +69,17 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    决策。当前项目 venv 缺少 SoulX 官方推理依赖，因而仅验证注入契约，未伪称模型
    已共驻运行。
 
-## 实时预算(一批同进程本地 fixture 回放，非 SLO)
+## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
 | 段 | cold n=1 p50 | warm n=4 p50/p95/p99 | 说明 |
 |---|---|---|---|
-| EOU → speak decision | 1033.4ms | 251.1 / 336.7 / 336.7ms | ⚠️ cold 超 1s；真实 Thinker 决策锚点 |
-| speak decision → 首 PCM | 561.4ms | 1350.3 / 1913.4 / 1913.4ms | ⚠️ 含 Talker 首块与首段 Code2Wav |
-| EOU → 首 PCM | 1594.8ms | 1601.5 / 2201.1 / 2201.1ms | ⚠️ 未达 1s，且仅本地 PCM |
-| Code2Wav 首块 | 299.2ms | 147.5 / 245.1 / 245.1ms | ⚠️ 不等于端到端客户体验 |
+| EOU → speak decision | 490.7ms | 237.0 / 324.8 / 324.8ms | ⚠️ 真实 Thinker 决策锚点 |
+| speak decision → 首 PCM | 1557.5ms | 1255.0 / 2001.0 / 2001.0ms | ⚠️ 含 Talker 首块与首段 Code2Wav |
+| EOU → 首 PCM | 2048.2ms | 1492.0 / 2325.8 / 2325.8ms | ⚠️ 未达 1s，且仅本地 PCM |
+| Code2Wav 首块 | 264.9ms | 115.9 / 169.8 / 169.8ms | ⚠️ 不等于端到端客户体验 |
 
-`speak decision` 与 `talker chunk ready` 已分离记录。该批次的 cold/warm 标签仅指
+`speak decision`、`Thinker prefill`、首 Thinker token 与 `talker chunk ready` 已分离
+记录。该批次的 cold/warm 标签仅指
 模型已经驻留后的第 1/后续实际推理轮次，**不包含权重加载**；每组样本远不足以形成
 统计意义的 SLO，且共享 GPU 调度会造成明显波动。它是按强制格式报告的可审计批次，
 不是性能承诺。
