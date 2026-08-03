@@ -252,3 +252,32 @@ def patch_torchaudio_load() -> None:
 
     torchaudio.load = patched_load
     torchaudio._channellm_compat = True
+
+
+def patch_torchaudio_save() -> None:
+    """torchaudio>=2.11 的 save 同样默认 torchcodec(需系统 ffmpeg)。
+    wav 写出用 soundfile 兜底:支持路径与 BytesIO,覆盖 Token2wav 的
+    ``torchaudio.save(output, wav, 24000, format='wav')`` 调用。"""
+    try:
+        import torchaudio
+    except ImportError:
+        return
+    if getattr(torchaudio, "_channellm_compat_save", False):
+        return
+    original_save = torchaudio.save
+
+    def patched_save(filepath_or_obj, src, sample_rate, *args, **kwargs):
+        fmt = kwargs.get("format")
+        target = str(filepath_or_obj).lower() if not hasattr(filepath_or_obj, "write") else ""
+        if fmt in (None, "wav") or target.endswith(".wav"):
+            import soundfile as sf
+
+            data = src.detach().float().cpu().numpy()
+            if data.ndim == 2:
+                data = data.T  # [channels, samples] -> [samples, channels]
+            sf.write(filepath_or_obj, data, int(sample_rate), format="WAV")
+            return
+        return original_save(filepath_or_obj, src, sample_rate, *args, **kwargs)
+
+    torchaudio.save = patched_save
+    torchaudio._channellm_compat_save = True

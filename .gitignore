@@ -11,11 +11,14 @@ dist/
 .venv/
 .env
 
-# Runtime artifacts(waterfall 报告是验收交付物,白名单入库)
+# Runtime artifacts(waterfall 报告与里程碑音频是验收交付物,白名单入库)
 artifacts/*
 !artifacts/p0/
 artifacts/p0/*
 !artifacts/p0/waterfall.md
+!artifacts/p1/
+artifacts/p1/*
+!artifacts/p1/voice_loop_reply.wav
 logs/
 *.log
 traces/
@@ -24,6 +27,8 @@ traces/
 *.wav
 *.pcm
 !tests/fixtures/**
+# 里程碑音频交付物(*.wav 全局规则的例外,必须在其后)
+!artifacts/p1/voice_loop_reply.wav
 
 # OMX / agent state
 .omx/
