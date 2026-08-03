@@ -151,7 +151,7 @@ def main() -> int:
     stream = np.concatenate([wave, tail])
 
     from channellm.duplex.driver import DuplexPipelineDriver
-    from channellm.duplex.playback import BufferedPlaybackSink
+    from channellm.duplex.playback import BufferedPlaybackSink, PcmPlayoutPump
     from channellm.duplex.queued_runtime import QueuedDuplexRuntime
     from channellm.duplex.runtime import RealtimeRuntime
     from channellm.metrics.latency import format_waterfall, waterfall
@@ -260,10 +260,8 @@ def main() -> int:
                     )
                 if not queued.close():
                     raise RuntimeError("queued duplex runtime did not stop")
-            played = sink.drain()
-            if played:
-                runtime.on_device_playout_start(played[0][1])
-                runtime.on_device_playout_finished(played[-1][1])
+            played = []
+            PcmPlayoutPump(sink, runtime, lambda pcm, tag: played.append((pcm, tag))).pump()
         torch.cuda.synchronize()
 
         loop_s = time.monotonic() - t0

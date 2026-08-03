@@ -226,6 +226,10 @@ class RealtimeRuntime:
         if not active.cleaned:
             self.orchestrator.cleanup(active.request_id)
             active.cleaned = True
+        if active.planned:
+            finish = getattr(self.sink, "finish", None)
+            if callable(finish):
+                finish(tag)
         self.state_machine.on_reply_done()
         self._active = None
         return True

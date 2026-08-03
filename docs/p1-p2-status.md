@@ -19,7 +19,7 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 | L1 引擎 | `engine/code2wav.py` Token2wav 封装 + StreamingSynth 分块流式 | ✅ 批量+流式双路径 |
 | L1 引擎 | `engine/audio_front.py` 官方流式 whisper 编码器混合封装 | ✅ 音频理解验证 |
 | L2 编排 | `pipeline/orchestrator.py` + `pipeline/transport.py` | ✅ 增量路由、有界队列、旧 epoch 清理 |
-| L3 控制 | `duplex/runtime.py` + `duplex/driver.py` + `duplex/queued_runtime.py` + `duplex/playback.py` | ✅ 真实三阶段驱动、单 GPU 有界 worker、cancel-not-await、待播 PCM 静音、播放生命周期 |
+| L3 控制 | `duplex/runtime.py` + `duplex/driver.py` + `duplex/queued_runtime.py` + `duplex/playback.py` | ✅ 真实三阶段驱动、单 GPU 有界 worker、cancel-not-await、待播 PCM 静音、writer-handoff 播放生命周期 |
 | L3 EOU 基准 | `duplex/eou_baseline.py` | ✅ 可注入 SoulX 官方状态流；⚠️ 当前 venv 未混入 SoulX 依赖，待独立官方服务/引擎部署实测 |
 
 ## 验证证据
@@ -68,6 +68,11 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    观测，且官方状态流未提供置信度时保留为未知；该观测不进入 MiniCPM-o 的说话
    决策。当前项目 venv 缺少 SoulX 官方推理依赖，因而仅验证注入契约，未伪称模型
    已共驻运行。
+10. **媒体 handoff 边界**:`PcmPlayoutPump` 逐帧把有界 PCM 缓冲交给注入的
+    LiveKit/声卡 writer，并在首个 handoff 与生成终止后的缓冲排空处驱动播放
+    生命周期。打断发生在 handoff 前时，旧 PCM 会被同步清空且 pump 不会写出它。
+    真实权重回放通过该路径产生 24kHz WAV（RMS 0.0623、peak 0.4304），未触发
+    信号失败或人工复核；它是 writer 边界，不是物理 DAC 或远端客户端证据。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
