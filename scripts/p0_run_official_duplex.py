@@ -42,15 +42,17 @@ AUDIO_SILENCE_THRESHOLD = 1e-3
 def load_model(model_dir: Path, device: str, attn_implementation: str):
     import torch
     from transformers import AutoConfig, AutoModel
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-    from channellm.models.minicpmo_compat import patch_config
+    from channellm.models.minicpmo_compat import patch_config, patch_model_class
 
-    # 权重目录自带 modeling 代码(trust_remote_code);同时放进 sys.path,
-    # 便于直接 import MiniCPMODuplex(官方 demo 的同构用法)。
-    sys.path.insert(0, str(model_dir))
+    # 权重目录的 modeling 代码是带相对导入的动态模块包,只能经
+    # transformers 的 auto_map 机制加载,不能直接 sys.path import。
     config = patch_config(
         AutoConfig.from_pretrained(str(model_dir), trust_remote_code=True)
     )
+    model_cls = get_class_from_dynamic_module(config.auto_map["AutoModel"], str(model_dir))
+    patch_model_class(model_cls)
     model = AutoModel.from_pretrained(
         str(model_dir),
         config=config,
@@ -63,8 +65,10 @@ def load_model(model_dir: Path, device: str, attn_implementation: str):
 
 
 def build_duplex(model):
-    from modeling_minicpmo import MiniCPMODuplex  # noqa: PLC0415 - 依赖 sys.path
+    import importlib
 
+    module = importlib.import_module(model.__class__.__module__)
+    MiniCPMODuplex = getattr(module, "MiniCPMODuplex")
     return MiniCPMODuplex.from_existing_model(model)
 
 

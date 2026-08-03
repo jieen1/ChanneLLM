@@ -34,3 +34,20 @@ def patch_config(config: Any) -> Any:
         if not hasattr(tts_config, key):
             setattr(tts_config, key, value)
     return config
+
+
+def patch_model_class(model_cls: type) -> type:
+    """MiniCPMO.__init__ 不调用 post_init();transformers 5 依赖 post_init
+    注册的 all_tied_weights_keys 做加载收尾。这里在 __init__ 之后补注册,
+    不触发权重初始化(权重随后被 checkpoint 覆盖)。"""
+    original_init = model_cls.__init__
+
+    def patched_init(self: Any, config: Any) -> None:
+        original_init(self, config)
+        if not hasattr(self, "all_tied_weights_keys"):
+            self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(
+                all_submodels=False
+            )
+
+    model_cls.__init__ = patched_init
+    return model_cls

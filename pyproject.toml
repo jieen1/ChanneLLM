@@ -41,6 +41,11 @@ omni = [
   "numba>=0.59",
   "tqdm>=4.66,<5",
   "torchvision>=0.28,<1",  # processing_minicpmo 注册 image processor 需要
+  # minicpmo-utils[all] 不在这里声明:它的元数据钉 transformers<4.53、
+  # librosa==0.9.0 等,会把主栈拖回旧版本。其 stepaudio2 Token2wav 实际
+  # 只用 transformers 稳定 API(AutoTokenizer/AutoConfig),与 5.x 兼容 ——
+  # setup_env.sh 用 --no-deps 安装并显式补真实依赖(见该脚本)。
+  "setuptools>=75,<81",  # stepaudio2/librosa 用 pkg_resources,setuptools 81+ 已移除
 ]
 
 [tool.setuptools.packages.find]

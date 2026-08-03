@@ -33,6 +33,12 @@ if [ "${1:-}" != "--base" ]; then
     echo "==> cuda + omni extra (torch==2.13.0 钉版 + 官方模型路径依赖)"
     uv pip install --python "$PY" -e ".[cuda,omni]"
 
+    # minicpmo-utils:元数据钉旧版 transformers/librosa,会拖垮主栈;
+    # --no-deps 绕过,显式补 stepaudio2 Token2wav 的真实运行依赖。
+    echo "==> minicpmo-utils (--no-deps) + vocoder 真实依赖"
+    uv pip install --python "$PY" --no-deps "minicpmo-utils[all]>=1.0.5"
+    uv pip install --python "$PY" diffusers xxhash nvidia-ml-py
+
     echo "==> sparkinfer fork (editable,依赖同样走镜像): $SPARKINFER_PATH"
     if [ -d "$SPARKINFER_PATH" ]; then
         uv pip install --python "$PY" -e "$SPARKINFER_PATH"

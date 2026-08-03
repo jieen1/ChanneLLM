@@ -9,10 +9,12 @@ driver 610.47,SM120(CC 12.0)。
 |---|---|---|
 | torch | ==2.13.0 | 与 BlackweLLM(qwen-sm120-runtime)同一契约;参考环境跑自编译 2.13.0a0+cu13.3,PyPI wheel 亦满足 |
 | triton | >=3.6,<4 | 验证过 3.6.0 |
-| transformers | >=5,<6 | 验证过 5.8.0 |
+| transformers | >=4.52,<6 | minicpmo-utils 钉 <5,实际解析 4.52.4;官方 P0 路径为一等公民 |
 | huggingface_hub | >=1,<2 | 验证过 1.13.0 |
 | safetensors | >=0.7,<1 | 验证过 0.7.0 |
 | sparkinfer | editable fork | torch>=2.12、nvidia-cutlass-dsl==4.6.0(JIT,无构建步骤) |
+| minicpmo-utils[all] | >=1.0.5 | stepaudio2 Token2wav vocoder;会连带 torchaudio、降 tokenizers |
+| setuptools | >=75,<81 | 81+ 移除了 pkg_resources,stepaudio2/librosa 仍依赖它 |
 
 装不上的钉版逐个解(R6):独立干净 venv,不混用其它项目环境。
 
