@@ -11,8 +11,11 @@ dist/
 .venv/
 .env
 
-# Runtime artifacts
-artifacts/
+# Runtime artifacts(waterfall 报告是验收交付物,白名单入库)
+artifacts/*
+!artifacts/p0/
+artifacts/p0/*
+!artifacts/p0/waterfall.md
 logs/
 *.log
 traces/
