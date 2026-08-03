@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any, Protocol
 
 from channellm.app.event_store import EventKind, EventStore
@@ -73,29 +74,34 @@ class RealtimeRuntime:
         self._playout_played_event_seqs: dict[EpochTag, int] = {}
         self._started_playout_tags: set[EpochTag] = set()
         self._pending_playout: EpochTag | None = None
+        # 输入控制、GPU worker 与媒体 writer 会并发调用本对象。临界区只覆盖
+        # epoch/事件状态，不包裹模型 forward，因而 barge-in 不会等待 GPU 工作。
+        self._lock = RLock()
 
     @property
     def active_tag(self) -> EpochTag | None:
-        return self._active.tag if self._active is not None else None
+        with self._lock:
+            return self._active.tag if self._active is not None else None
 
     def begin_turn(self, speech_id: str = "") -> EpochTag:
         """开始输入回合；若正在回复，先同步打断旧回合且绝不等待它。"""
-        previous = self._active
-        if previous is not None:
-            self._barge_in_active(previous)
-        elif self._pending_playout is not None:
-            self._barge_in_pending_playout(self._pending_playout)
+        with self._lock:
+            previous = self._active
+            if previous is not None:
+                self._barge_in_active(previous)
+            elif self._pending_playout is not None:
+                self._barge_in_pending_playout(self._pending_playout)
 
-        tag = self.epoch_guard.advance(speech_id)
-        request_id = new_request_id()
-        self.orchestrator.submit_initial(request_id, tag.turn_epoch, tag.speech_id)
-        self.state_machine.on_input_start(tag)
-        self._active = _ActiveTurn(
-            request_id=request_id,
-            tag=tag,
-            trace_id=self._new_trace_id(),
-        )
-        return tag
+            tag = self.epoch_guard.advance(speech_id)
+            request_id = new_request_id()
+            self.orchestrator.submit_initial(request_id, tag.turn_epoch, tag.speech_id)
+            self.state_machine.on_input_start(tag)
+            self._active = _ActiveTurn(
+                request_id=request_id,
+                tag=tag,
+                trace_id=self._new_trace_id(),
+            )
+            return tag
 
     def reap_cancelled(self) -> int:
         """回收已经 cancel 的请求，不等待模型任务完成。
@@ -103,20 +109,22 @@ class RealtimeRuntime:
         由外层媒体循环在安全 tick 调用；把这一步与 barge-in 的同步临界区
         分开，既满足 cancel-not-await，又避免 cancelled request 无限滞留。
         """
-        request_ids = self._cancelled_request_ids
-        self._cancelled_request_ids = []
-        for request_id in request_ids:
-            self.orchestrator.cleanup(request_id)
-        return len(request_ids)
+        with self._lock:
+            request_ids = self._cancelled_request_ids
+            self._cancelled_request_ids = []
+            for request_id in request_ids:
+                self.orchestrator.cleanup(request_id)
+            return len(request_ids)
 
     def on_eou(self, tag: EpochTag | None = None) -> bool:
         """记录模型的 EOU 观察；过期观察不能改变当前会话状态。"""
-        active = self._active
-        if active is None or not self._is_current(tag or active.tag):
-            return False
-        self.state_machine.on_eou()
-        self._anchor(Anchor.EOU_DETECTED, active.tag, active.trace_id)
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or not self._is_current(tag or active.tag):
+                return False
+            self.state_machine.on_eou()
+            self._anchor(Anchor.EOU_DETECTED, active.tag, active.trace_id)
+            return True
 
     def on_speak_decision(self, tag: EpochTag) -> bool:
         """记录 MiniCPM-o 首次决定开口的时刻。
@@ -125,43 +133,47 @@ class RealtimeRuntime:
         ``TALKER_CHUNK_READY`` 的时刻，否则会把 Talker 首块生成耗时伪装成
         Thinker 决策耗时，污染 EOU waterfall。
         """
-        active = self._active
-        if active is None or active.tag != tag or not self._is_current(tag):
-            return False
-        if not active.speak_decision:
-            active.speak_decision = True
-            self._anchor(Anchor.SPEAK_DECISION, tag, active.trace_id)
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            if not active.speak_decision:
+                active.speak_decision = True
+                self._anchor(Anchor.SPEAK_DECISION, tag, active.trace_id)
+            return True
 
     def on_streaming_prefill_start(self, tag: EpochTag, *, ts_ns: int | None = None) -> bool:
         """记录 Thinker 开始处理一个输入 unit 的时刻。"""
-        active = self._active
-        if active is None or active.tag != tag or not self._is_current(tag):
-            return False
-        if not active.streaming_prefill_started:
-            active.streaming_prefill_started = True
-            self._anchor(Anchor.STREAMING_PREFILL_START, tag, active.trace_id, ts_ns=ts_ns)
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            if not active.streaming_prefill_started:
+                active.streaming_prefill_started = True
+                self._anchor(Anchor.STREAMING_PREFILL_START, tag, active.trace_id, ts_ns=ts_ns)
+            return True
 
     def on_streaming_prefill_done(self, tag: EpochTag, *, ts_ns: int | None = None) -> bool:
         """记录当前回复首个 Thinker token 之前的输入 prefill 已完成。"""
-        active = self._active
-        if active is None or active.tag != tag or not self._is_current(tag):
-            return False
-        if not active.streaming_prefill_done:
-            active.streaming_prefill_done = True
-            self._anchor(Anchor.THINKER_PREFILL_DONE, tag, active.trace_id, ts_ns=ts_ns)
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            if not active.streaming_prefill_done:
+                active.streaming_prefill_done = True
+                self._anchor(Anchor.THINKER_PREFILL_DONE, tag, active.trace_id, ts_ns=ts_ns)
+            return True
 
     def on_first_token_decoded(self, tag: EpochTag, *, ts_ns: int | None = None) -> bool:
         """记录当前回复的首个 Thinker token 已由模型采样。"""
-        active = self._active
-        if active is None or active.tag != tag or not self._is_current(tag):
-            return False
-        if not active.first_token_decoded:
-            active.first_token_decoded = True
-            self._anchor(Anchor.FIRST_TOKEN_DECODED, tag, active.trace_id, ts_ns=ts_ns)
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            if not active.first_token_decoded:
+                active.first_token_decoded = True
+                self._anchor(Anchor.FIRST_TOKEN_DECODED, tag, active.trace_id, ts_ns=ts_ns)
+            return True
 
     def set_response_text(self, tag: EpochTag, text: str) -> bool:
         """保存本回合最终文本，供真正播放后写入 L4 事实。
@@ -169,22 +181,23 @@ class RealtimeRuntime:
         这不是 transcript 的权威写入：只有媒体 writer 报告首帧 handoff 后，文本
         才会伴随 ``AgentSpeechActuallyPlayed`` 进入事件日志。
         """
-        active = self._active
-        if active is None or active.tag != tag or not self._is_current(tag):
-            return False
-        active.response_text = text.strip()
-        if active.planned:
-            self._playout_texts[tag] = active.response_text
-            played_seq = self._playout_played_event_seqs.get(tag)
-            if played_seq is not None and self.event_store is not None:
-                self._playout_played_event_seqs[tag] = self.event_store.supersede(
-                    played_seq,
-                    EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
-                    payload={"text": active.response_text},
-                    turn_id=self._playout_requests.get(tag),
-                    speech_id=tag.speech_id,
-                )
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            active.response_text = text.strip()
+            if active.planned:
+                self._playout_texts[tag] = active.response_text
+                played_seq = self._playout_played_event_seqs.get(tag)
+                if played_seq is not None and self.event_store is not None:
+                    self._playout_played_event_seqs[tag] = self.event_store.supersede(
+                        played_seq,
+                        EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
+                        payload={"text": active.response_text},
+                        turn_id=self._playout_requests.get(tag),
+                        speech_id=tag.speech_id,
+                    )
+            return True
 
     def on_device_playout_start(self, tag: EpochTag) -> bool:
         """由媒体 writer 在设备/下行真正取走首块 PCM 时调用。
@@ -193,33 +206,35 @@ class RealtimeRuntime:
         trace id 独立保存，不依赖仍存在的 ``_active`` 请求。被 barge-in 作废
         的 tag 会在 ``begin_turn`` 被移除，不能留下虚假的设备播放锚点。
         """
-        trace_id = self._playout_traces.get(tag)
-        if trace_id is None or not self._is_current(tag):
-            return False
-        if tag not in self._started_playout_tags:
-            self._started_playout_tags.add(tag)
-            self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
-            if self.event_store is not None:
-                self._playout_played_event_seqs[tag] = self.event_store.append(
-                    EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
-                    payload={"text": self._playout_texts.get(tag, "")},
-                    turn_id=self._playout_requests.get(tag),
-                    speech_id=tag.speech_id,
-                )
-        return True
+        with self._lock:
+            trace_id = self._playout_traces.get(tag)
+            if trace_id is None or not self._is_current(tag):
+                return False
+            if tag not in self._started_playout_tags:
+                self._started_playout_tags.add(tag)
+                self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
+                if self.event_store is not None:
+                    self._playout_played_event_seqs[tag] = self.event_store.append(
+                        EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
+                        payload={"text": self._playout_texts.get(tag, "")},
+                        turn_id=self._playout_requests.get(tag),
+                        speech_id=tag.speech_id,
+                    )
+            return True
 
     def on_device_playout_finished(self, tag: EpochTag) -> bool:
         """媒体 writer 已播放完当前回复的全部待播 PCM。"""
-        if self._pending_playout != tag:
-            return False
-        self._pending_playout = None
-        self._playout_traces.pop(tag, None)
-        self._playout_requests.pop(tag, None)
-        self._playout_texts.pop(tag, None)
-        self._playout_played_event_seqs.pop(tag, None)
-        self._started_playout_tags.discard(tag)
-        self.state_machine.on_playout_finished(tag)
-        return True
+        with self._lock:
+            if self._pending_playout != tag:
+                return False
+            self._pending_playout = None
+            self._playout_traces.pop(tag, None)
+            self._playout_requests.pop(tag, None)
+            self._playout_texts.pop(tag, None)
+            self._playout_played_event_seqs.pop(tag, None)
+            self._started_playout_tags.discard(tag)
+            self.state_machine.on_playout_finished(tag)
+            return True
 
     def submit_stage_output(
         self,
@@ -234,34 +249,36 @@ class RealtimeRuntime:
         返回值是编排器产生的下游输入，供外层立即提交到下一个模型 stage。
         过期回合在调用编排器前即丢弃，避免旧 token/codec 再占用 GPU。
         """
-        active = self._active
-        if active is None or not self._is_current(tag) or active.tag != tag:
-            return []
+        with self._lock:
+            active = self._active
+            if active is None or not self._is_current(tag) or active.tag != tag:
+                return []
 
-        emitted = self._submit_to_orchestrator(active.request_id, stage, payload, final)
-        for chunk in emitted:
-            if not self._is_current(tag):
-                break
-            self._record_pipeline_progress(active, chunk)
-            if self._is_pcm_output(chunk):
-                self._publish_pcm(active, chunk)
-        return emitted
+            emitted = self._submit_to_orchestrator(active.request_id, stage, payload, final)
+            for chunk in emitted:
+                if not self._is_current(tag):
+                    break
+                self._record_pipeline_progress(active, chunk)
+                if self._is_pcm_output(chunk):
+                    self._publish_pcm(active, chunk)
+            return emitted
 
     def finish_turn(self, tag: EpochTag) -> bool:
         """结束当前回合，即使没有音频产出也清理 resumable 请求。"""
-        active = self._active
-        if active is None or active.tag != tag or not self._is_current(tag):
-            return False
-        if not active.cleaned:
-            self.orchestrator.cleanup(active.request_id)
-            active.cleaned = True
-        if active.planned:
-            finish = getattr(self.sink, "finish", None)
-            if callable(finish):
-                finish(tag)
-        self.state_machine.on_reply_done()
-        self._active = None
-        return True
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            if not active.cleaned:
+                self.orchestrator.cleanup(active.request_id)
+                active.cleaned = True
+            if active.planned:
+                finish = getattr(self.sink, "finish", None)
+                if callable(finish):
+                    finish(tag)
+            self.state_machine.on_reply_done()
+            self._active = None
+            return True
 
     def _submit_to_orchestrator(
         self, request_id: str, stage: StageId, payload: Any, final: bool
