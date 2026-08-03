@@ -86,6 +86,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     非有限值与错位 interleaved frame。新的输入会丢弃未凑满的旧输入尾帧再推进
     epoch，避免跨用户说话片段混合。LiveKit 48kHz → 16kHz 的高保真重采样仍须由
     具体 SDK/设备适配器显式提供，未伪称已接入。
+13. **P5 部署预检**:`scripts/media_preflight.py` 分别检查 LiveKit SDK、四项
+    连接配置存在性和本地 PCM 设备，不读取或输出 secret。当前环境四项远端前提及
+    本地 PCM 设备均缺失，因此 P5 仍是明确的外部环境阻塞，而非“测试通过”的假象。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
