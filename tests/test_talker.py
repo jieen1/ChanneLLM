@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from channellm.engine.blocks import TorchListKV
-from channellm.engine.talker import Talker, TalkerConfig, map_tts_key
+from channellm.engine.talker import Talker, TalkerConfig, TalkerStream, map_tts_key
 
 
 def tiny_config() -> TalkerConfig:
@@ -64,6 +64,24 @@ def test_generate_is_seeded_deterministic() -> None:
     a = talker.generate_codec_tokens(ids, hidden, TorchListKV(), max_new_tokens=6)
     b = talker.generate_codec_tokens(ids, hidden, TorchListKV(), max_new_tokens=6)
     assert a == b  # seed 42 固定,两次生成一致
+
+
+def test_stream_keeps_kv_between_units_and_resets_after_eou() -> None:
+    torch.manual_seed(13)
+    talker = Talker(tiny_config())
+    stream = TalkerStream(talker, TorchListKV)
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+
+    first = stream.push(ids, hidden)
+    assert 1 <= len(first) <= 25  # 首 unit 可提前停止
+    assert stream._kv.length > len(first)
+
+    next_chunk = stream.push(ids, hidden)
+    assert len(next_chunk) == 25  # 非末 unit 必须形成完整 phrase
+    stream.push(ids, hidden, end_of_turn=True)
+    assert stream._kv.length == 0
+    assert not stream._started
 
 
 def test_map_tts_key() -> None:

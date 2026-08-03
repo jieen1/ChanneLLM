@@ -161,14 +161,16 @@ class DuplexSession:
         """喂一个音频 chunk,执行 listen/speak 决策,返回本 chunk 结果。"""
         p = self.params
         torch.cuda.synchronize()
-        t_embed = time.time()
+        # 性能数字属于单机耗时，必须使用单调时钟；wall clock 的 NTP 校时会
+        # 产生负延迟并污染 trace/质量报告。
+        t_embed = time.monotonic()
         audio_embeds = self.audio_front.feed_chunk(pcm)
         unit_id = self.audio_front.unit_token_id
         embeds = torch.cat([self._embed_ids([unit_id]), audio_embeds], dim=0)
         logits = self.thinker.forward_embeds(embeds, self.kv)[-1].float()
         torch.cuda.synchronize()
-        cost_embed_ms = (time.time() - t_embed) * 1000
-        t_dec = time.time()
+        cost_embed_ms = (time.monotonic() - t_embed) * 1000
+        t_dec = time.monotonic()
 
         force_listen = self._generate_count < p.force_listen_count
         self._generate_count += 1
@@ -212,7 +214,7 @@ class DuplexSession:
         self._feed_token(self.unit_end_id)
         self.unit_records.append(unit_records)
         torch.cuda.synchronize()
-        cost_decision_ms = (time.time() - t_dec) * 1000
+        cost_decision_ms = (time.monotonic() - t_dec) * 1000
         return ChunkDecision(
             is_listen, unit_ids, end_of_turn, n_speak,
             cost_embed_ms, cost_decision_ms,
@@ -231,4 +233,28 @@ class DuplexSession:
         return (
             torch.tensor(token_ids, dtype=torch.long, device=self.device),
             torch.stack(hiddens).to(self.thinker.embed_tokens.weight.dtype),
+        )
+
+    def latest_unit_conditioning(self):
+        """返回刚完成 unit 的语义条件，供实时 Talker 续写。
+
+        官方 ``streaming_generate`` 每次只将当前 ``total_hidden_in_unit``
+        交给 TTS；不能把整回合重放给已有 KV 的 Talker，否则条件与 codec
+        会被重复编码，导致边界处音质和节奏退化。
+        """
+        records = self.unit_records[-1] if self.unit_records else []
+        if not records:
+            return (
+                torch.empty(0, dtype=torch.long, device=self.device),
+                torch.empty(
+                    (0, self.thinker.config.hidden_size),
+                    dtype=self.thinker.embed_tokens.weight.dtype,
+                    device=self.device,
+                ),
+            )
+        return (
+            torch.tensor([token_id for token_id, _hidden, _eot in records], device=self.device),
+            torch.stack([hidden for _token_id, hidden, _eot in records]).to(
+                self.thinker.embed_tokens.weight.dtype
+            ),
         )

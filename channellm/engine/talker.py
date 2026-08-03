@@ -260,6 +260,7 @@ class Talker(nn.Module):
         logits: torch.Tensor,
         generated: list[int],
         generator: torch.Generator,
+        min_new_tokens: int | None = None,
     ) -> int:
         """官方非流式采样序列:temperature → 窗口 16 频次式重复惩罚 →
         top_p → top_k → 前 min_new_tokens 步屏蔽 EOS → softmax → multinomial。"""
@@ -278,7 +279,8 @@ class Talker(nn.Module):
             top_p, top_k = self._get_warpers()
             scores = top_p(input_ids, scores)
             scores = top_k(input_ids, scores)
-        if len(generated) < cfg.min_new_tokens:
+        minimum = cfg.min_new_tokens if min_new_tokens is None else min_new_tokens
+        if len(generated) < minimum:
             scores[:, cfg.codec_eos_token_id] = float("-inf")
         probs = F.softmax(scores, dim=-1)
         return int(torch.multinomial(probs, 1, generator=generator).view(-1).item())
@@ -314,6 +316,85 @@ class Talker(nn.Module):
         if out and out[-1] == cfg.codec_eos_token_id:
             out.pop()
         return out
+
+
+class TalkerStream:
+    """以官方 ``MiniCPMTTS.generate_chunk`` 口径续写单回合 codec。
+
+    每个 Thinker unit 都把新语义条件和 ``audio_bos`` 追加到同一 KV，再生成
+    一个可交给 Code2Wav 的 phrase。正常 unit 强制 25 帧，首 unit 和 EOU
+    unit 允许不足 25 帧，以避免首包和收尾被无意义填充拖慢。
+
+    ``kv_factory`` 是显式注入的：不同回合绝不复用 TTS KV，barge-in 时调用
+    ``reset`` 即可同步丢弃旧回合状态，而不需要等待 GPU 旧请求完成。
+    """
+
+    def __init__(self, talker: Talker, kv_factory) -> None:
+        self.talker = talker
+        self._kv_factory = kv_factory
+        self._kv: KVBackend
+        self._generator: torch.Generator
+        self._started = False
+        self.reset()
+
+    def reset(self) -> None:
+        self._kv = self._kv_factory()
+        self._generator = torch.Generator(device=self.talker.emb_text.weight.device)
+        self._generator.manual_seed(self.talker.config.seed)
+        self._started = False
+
+    @torch.no_grad()
+    def push(
+        self,
+        token_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        *,
+        end_of_turn: bool = False,
+    ) -> list[int]:
+        """生成本 unit 的 codec 帧；EOU 后立即释放该回合 KV。"""
+        cfg = self.talker.config
+        condition = self.talker.build_condition(token_ids, hidden_states, duplex=True)
+        hidden = self.talker.forward_embeds(condition, self._kv)
+        logits = self.talker.head_code(hidden[-1])
+
+        # 官方输入 max_new_token=26，返回前 25 个 token，同时用第 26 次
+        # forward 把第 25 帧写进 KV。这里直接执行等价的 25 次“采样→写 KV”。
+        target_frames = 25
+        min_frames = 0 if (not self._started or end_of_turn) else target_frames
+        generated: list[int] = []
+        completed_phrase = True
+        for _ in range(target_frames):
+            token = self.talker._sample_codec(
+                logits,
+                generated,
+                self._generator,
+                min_new_tokens=min_frames,
+            )
+            if token == cfg.codec_eos_token_id:
+                completed_phrase = False
+                break
+            generated.append(token)
+            token_embed = self.talker.emb_code(
+                torch.tensor([token], dtype=torch.long, device=condition.device)
+            )
+            hidden = self.talker.forward_embeds(token_embed, self._kv)
+            logits = self.talker.head_code(hidden[-1])
+
+        if completed_phrase:
+            # 官方在第 26 次 decode 时会采样一个不返回的 lookahead token。
+            # 它不写 KV，却会推进 RNG；保留这一步使下一 unit 的采样序列与
+            # 官方 generate_chunk 的状态机一致。
+            self.talker._sample_codec(
+                logits,
+                generated,
+                self._generator,
+                min_new_tokens=min_frames,
+            )
+
+        self._started = True
+        if end_of_turn:
+            self.reset()
+        return generated
 
 
 # ---------------------------------------------------------------------------

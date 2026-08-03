@@ -2,9 +2,10 @@
 """P2 里程碑 —— 自研引擎全双工闭环:语音进 -> 决策 -> 语音出。
 
 音频按 duplex 协议流式喂入,每 chunk 跑官方口径的 listen/speak 决策;
-模型决定开口后累积回复 token + 隐层,轮末经 Talker(hidden_text_merge)
-与 Code2Wav 合成 24kHz 回复音频。这个脚本仍是回放验证，不能当作实时
-端到端延迟证据。全程自研引擎(音频编码器除外,
+模型决定开口后立即以当前 unit 的 Thinker 隐层续写 Talker KV，codec phrase
+经 L2 编排后流式送入 Code2Wav，再由 L3 runtime 发布 24kHz 回复音频。
+这是本地回放的真实三阶段路径；不含 LiveKit 网络与设备播放，故不能把这里的
+首 PCM 延迟报告为端到端客户体验延迟。全程自研引擎(音频编码器除外,
 策略同 vllm-omni:非热路径复用官方实现)。
 
 用法:
@@ -33,6 +34,19 @@ DEFAULT_WAV = (
 REF_WAV_SUFFIX = Path("assets") / "HT_ref_audio.wav"
 
 
+class CollectingSink:
+    """本地回放接收器；生产媒体层需实现同一 PlaybackSink 契约。"""
+
+    def __init__(self) -> None:
+        self.parts: list[np.ndarray] = []
+
+    def mute(self) -> None:
+        self.parts.clear()
+
+    def publish(self, pcm, _tag) -> None:
+        self.parts.append(np.asarray(pcm, dtype=np.float32).reshape(-1).copy())
+
+
 def find_snapshot() -> Path:
     snaps = sorted(SNAPSHOT_GLOB.glob("*/"))
     if not snaps:
@@ -44,9 +58,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wav", type=Path, default=DEFAULT_WAV)
     parser.add_argument("--silence-tail-s", type=float, default=6.0)
-    parser.add_argument("--max-codec-tokens", type=int, default=1500)
     parser.add_argument(
         "--out", type=Path, default=Path("artifacts/p2/duplex_reply.wav")
+    )
+    parser.add_argument(
+        "--trace", type=Path, default=Path("artifacts/p2/duplex_trace.jsonl")
     )
     args = parser.parse_args()
 
@@ -66,7 +82,7 @@ def main() -> int:
     patch_torchaudio_load()
     patch_torchaudio_save()
     from channellm.engine.duplex_session import DuplexSession
-    from channellm.engine.talker import load_talker_weights
+    from channellm.engine.talker import TalkerStream, load_talker_weights
     from channellm.engine.thinker import (
         SparkinferPagedKV,
         ThinkerConfig,
@@ -78,21 +94,21 @@ def main() -> int:
         SparkinferPagedAttn,
     )
 
-    t0 = time.time()
+    t0 = time.monotonic()
     audio_front = AudioFront(model_dir, device=device, dtype=dtype)
-    print(f"[load] AudioFront {time.time() - t0:.1f}s")
+    print(f"[load] AudioFront {time.monotonic() - t0:.1f}s")
 
-    t0 = time.time()
+    t0 = time.monotonic()
     thinker = load_thinker_weights(model_dir, device=device, dtype=dtype)
-    print(f"[load] Thinker {time.time() - t0:.1f}s")
+    print(f"[load] Thinker {time.monotonic() - t0:.1f}s")
 
-    t0 = time.time()
+    t0 = time.monotonic()
     talker = load_talker_weights(model_dir, device=device, dtype=dtype)
-    print(f"[load] Talker {time.time() - t0:.1f}s")
+    print(f"[load] Talker {time.monotonic() - t0:.1f}s")
 
-    t0 = time.time()
+    t0 = time.monotonic()
     code2wav = Code2Wav(model_dir, model_dir / REF_WAV_SUFFIX)
-    print(f"[load] Code2Wav {time.time() - t0:.1f}s")
+    print(f"[load] Code2Wav {time.monotonic() - t0:.1f}s")
 
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
     pool = PagedKVPool(
@@ -127,30 +143,54 @@ def main() -> int:
     tail = np.zeros(int(args.silence_tail_s * 16000), dtype=np.float32)
     stream = np.concatenate([wave, tail])
 
+    from channellm.duplex.driver import DuplexPipelineDriver
+    from channellm.duplex.runtime import RealtimeRuntime
+    from channellm.engine.blocks import TorchListKV
+    from channellm.metrics.latency import format_waterfall, waterfall
+    from channellm.pipeline.orchestrator import Orchestrator
+    from channellm.tracing import TraceRecorder, load_records
+
+    sink = CollectingSink()
+    talker_stream = TalkerStream(talker, TorchListKV)
+    args.trace.parent.mkdir(parents=True, exist_ok=True)
     proc = audio_front.model.processor
     pos, idx = 0, 0
     decisions = []
+    eou_marked = False
     torch.cuda.synchronize()
-    t0 = time.time()
-    while pos < len(stream):
-        n = proc.get_streaming_chunk_size()
-        piece = stream[pos : pos + n]
-        if len(piece) < n:
-            piece = np.concatenate(
-                [piece, np.zeros(n - len(piece), dtype=np.float32)]
+    t0 = time.monotonic()
+    with TraceRecorder(args.trace, session_id="p2-local-replay") as recorder:
+        runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
+        driver = DuplexPipelineDriver(runtime, session, talker_stream, code2wav)
+        tag = driver.begin_turn("local-replay")
+        while pos < len(stream):
+            if not eou_marked and pos >= len(wave):
+                driver.on_eou(tag)
+                eou_marked = True
+            n = proc.get_streaming_chunk_size()
+            piece = stream[pos : pos + n]
+            if len(piece) < n:
+                piece = np.concatenate(
+                    [piece, np.zeros(n - len(piece), dtype=np.float32)]
+                )
+            decision = driver.process_audio_chunk(tag, piece)
+            if decision is None:
+                break
+            decisions.append(decision)
+            state = "LISTEN" if decision.is_listen else f"SPEAK+{decision.n_speak_tokens}"
+            eot = " EOT" if decision.end_of_turn else ""
+            print(
+                f"[chunk{idx:02d}] {state}{eot} "
+                f"(embed {decision.cost_embed_ms:.0f}ms + 决策 {decision.cost_decision_ms:.0f}ms)"
             )
-        decision = session.on_chunk(piece)
-        decisions.append(decision)
-        tag = "LISTEN" if decision.is_listen else f"SPEAK+{decision.n_speak_tokens}"
-        eot = " EOT" if decision.end_of_turn else ""
-        print(
-            f"[chunk{idx:02d}] {tag}{eot} "
-            f"(embed {decision.cost_embed_ms:.0f}ms + 决策 {decision.cost_decision_ms:.0f}ms)"
-        )
-        pos += n
-        idx += 1
+            pos += n
+            idx += 1
+            if runtime.active_tag is None:
+                break
+        if not eou_marked:
+            driver.on_eou(tag)
     torch.cuda.synchronize()
-    loop_s = time.time() - t0
+    loop_s = time.monotonic() - t0
     n_listen = sum(1 for d in decisions if d.is_listen)
     over = [i for i, d in enumerate(decisions)
             if d.cost_embed_ms + d.cost_decision_ms > 1000]
@@ -161,46 +201,9 @@ def main() -> int:
     reply_text = tok.decode(session.res_ids, skip_special_tokens=True)
     print(f"[reply] {reply_text[:300]!r}")
 
-    cond_ids, cond_hidden = session.collect_conditioning()
-    if cond_ids is None:
-        print("[verify] FAIL: 模型未开口,无回复可合成")
-        return 1
-
-    from channellm.engine.blocks import TorchListKV
-
-    talker_kv = TorchListKV()
-    torch.cuda.synchronize()
-    t0 = time.time()
-    codec_tokens = talker.generate_codec_tokens(
-        cond_ids, cond_hidden, talker_kv,
-        max_new_tokens=args.max_codec_tokens, duplex=True,
-    )
-    torch.cuda.synchronize()
-    tts_s = time.time() - t0
-    print(f"[talker] codec {len(codec_tokens)} tok / {tts_s:.2f}s")
-    if not codec_tokens:
-        print("[verify] FAIL: Talker 未产出 codec token")
-        return 1
-
-    from channellm.engine.code2wav import StreamingSynth
-
-    synth = StreamingSynth(code2wav)
-    torch.cuda.synchronize()
-    t0 = time.time()
-    ttfp = None
-    parts = []
-    piece_wav = synth.push(codec_tokens, flush=True)
-    if piece_wav is not None:
-        ttfp = time.time() - t0
-        parts.append(piece_wav)
-    torch.cuda.synchronize()
-    synth_s = time.time() - t0
-    wav = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
-    audio_s = len(wav) / 24000
-    print(
-        f"[code2wav-stream] {synth.n_chunks} 块 / {audio_s:.2f}s 音频 / "
-        f"合成 {synth_s:.2f}s / 首块 {ttfp * 1000 if ttfp else 0:.0f}ms"
-    )
+    wav = np.concatenate(sink.parts) if sink.parts else np.zeros(0, dtype=np.float32)
+    records = load_records(args.trace)
+    print(format_waterfall(waterfall(records)))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(args.out), wav, 24000)
@@ -213,7 +216,7 @@ def main() -> int:
         f"clip={quality.clipped_ratio:.6f})"
     )
     spoke = bool(session.res_ids)
-    ok = spoke and not failures
+    ok = spoke and bool(sink.parts) and not failures
     detail = "; ".join(failures) if failures else "signal-integrity gate passed"
     print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke}; {detail}")
     return 0 if ok else 1
