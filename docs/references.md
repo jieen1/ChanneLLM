@@ -18,6 +18,11 @@ Apache 2.0,仅参考,**不作为运行时依赖**。本地路径均在 `~/projec
 | 独立 EOU 基准 | `~/project/SoulX-Duplug`(Soul-AILab) |
 | 官方仓库 | `~/project/MiniCPM-o`(OpenBMB) |
 | SM120 内核 | `~/project/sparkinfer`(jieen1/sparkinfer fork;本仓库 `third_party/sparkinfer` 钉版) |
+
+**sparkinfer 双轨关系:** `third_party/sparkinfer` submodule 钉 fork 远程的
+已推送状态(可复现口径);日常开发装的是 editable 的 `~/project/sparkinfer`
+(`scripts/setup_env.sh` 默认),即 fork 的最新本地状态。两者分叉时运行时以
+editable 为准,验证通过后推送 fork 并更新 submodule 钉版。
 | SM120 环境经验 | `~/project/qwen-sm120-runtime`(BlackweLLM;无代码复用,仅环境契约) |
 
 **明确不参考**:PD 分离、CFG companion、collective RPC、分布式 KV transfer、
