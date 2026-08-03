@@ -48,6 +48,22 @@ def batch_artifact_path(path: Path, batch_id: str, run_number: int) -> Path:
     )
 
 
+def cuda_memory_line(*, peak: bool = False) -> str:
+    """当前进程的 allocator 指标；不用于推断其他进程或整卡峰值。"""
+    if peak:
+        allocated = torch.cuda.max_memory_allocated()
+        reserved = torch.cuda.max_memory_reserved()
+        label = "peak"
+    else:
+        allocated = torch.cuda.memory_allocated()
+        reserved = torch.cuda.memory_reserved()
+        label = "resident"
+    return (
+        f"[memory] {label}: allocated={allocated / 2**30:.2f}GiB "
+        f"reserved={reserved / 2**30:.2f}GiB"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wav", type=Path, default=DEFAULT_WAV)
@@ -119,6 +135,8 @@ def main() -> int:
     t0 = time.monotonic()
     code2wav = Code2Wav(model_dir, model_dir / REF_WAV_SUFFIX)
     print(f"[load] Code2Wav {time.monotonic() - t0:.1f}s")
+    torch.cuda.synchronize()
+    print(cuda_memory_line())
 
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
     pool = PagedKVPool(
@@ -192,6 +210,7 @@ def main() -> int:
         decisions = []
         eou_marked = False
         torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
         t0 = time.monotonic()
         with TraceRecorder(
             run_trace,
@@ -271,6 +290,7 @@ def main() -> int:
             played = []
             PcmPlayoutPump(sink, runtime, lambda pcm, tag: played.append((pcm, tag))).pump()
         torch.cuda.synchronize()
+        print(cuda_memory_line(peak=True))
 
         loop_s = time.monotonic() - t0
         n_listen = sum(1 for decision in decisions if decision.is_listen)
