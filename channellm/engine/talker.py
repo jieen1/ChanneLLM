@@ -202,9 +202,11 @@ class Talker(nn.Module):
         ids = token_ids.to(device=device, dtype=torch.long).reshape(-1)
         hidden = hidden_states.to(device=device, dtype=dtype)
         if ids.numel() == 0 or hidden.numel() == 0:
-            # 模型决定不开口:仅边界条件
-            boundary = [cfg.text_eos_token_id, cfg.audio_bos_token_id]
-            return self.emb_text(torch.tensor(boundary, device=device))
+            # 对齐官方 MiniCPMODuplex._convert_results_to_tts_input：没有
+            # thinker 语义 token 时只能以 audio_bos 作为条件。text_eos 属于
+            # 非流式「有文本条件」的收束边界，不能凭空插入，否则会改变首帧
+            # codec 分布并污染静音/短回复回退路径。
+            return self.emb_text(torch.tensor([cfg.audio_bos_token_id], device=device))
         text_embeds = self.emb_text(ids)
         hidden_embeds = self.projector_semantic(hidden)
         if cfg.normalize_projected_hidden:

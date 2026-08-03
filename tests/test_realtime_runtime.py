@@ -6,6 +6,7 @@ from channellm.app.event_store import EventKind, EventStore
 from channellm.duplex.epoch import EpochTag
 from channellm.duplex.runtime import RealtimeRuntime
 from channellm.duplex.session import TurnPhase
+from channellm.metrics.latency import waterfall
 from channellm.pipeline.orchestrator import Orchestrator
 from channellm.pipeline.stages import StageId, StageRequestState
 from channellm.tracing import Anchor, TraceRecorder, load_records
@@ -193,3 +194,107 @@ def test_runtime_only_publishes_code2wav_pcm_not_interstage_codec(tmp_path):
     anchors = [record.anchor for record in load_records(trace_path)]
     assert Anchor.SPEAK_DECISION in anchors
     assert Anchor.TALKER_CHUNK_READY in anchors
+
+
+def test_runtime_routes_three_stages_and_records_a_single_first_pcm_anchor(tmp_path):
+    trace_path = tmp_path / "runtime.jsonl"
+    sink = FakeSink()
+    with TraceRecorder(trace_path, session_id="rt-three-stage") as recorder:
+        runtime = RealtimeRuntime(
+            orchestrator=Orchestrator(codec_chunk_frames=2, codec_left_context_frames=1),
+            sink=sink,
+            trace_recorder=recorder,
+        )
+        tag = runtime.begin_turn("speech-three-stage")
+        assert runtime.on_eou(tag)
+
+        talker_input = runtime.submit_stage_output(tag, StageId.THINKER, {"hidden": "h"})
+        assert len(talker_input) == 1
+        assert talker_input[0].stage is StageId.TALKER
+
+        assert runtime.submit_stage_output(tag, StageId.TALKER, [1, 2]) == []
+        code2wav_input = runtime.submit_stage_output(tag, StageId.TALKER, [3])
+        assert len(code2wav_input) == 1
+        assert code2wav_input[0].stage is StageId.CODE2WAV
+        assert code2wav_input[0].payload == (1, 2, 3)
+        assert sink.published == []
+
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm-1")
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm-2")
+
+    assert sink.published == [(b"pcm-1", tag), (b"pcm-2", tag)]
+    assert runtime.state_machine.phase is TurnPhase.SPEAKING
+    records = load_records(trace_path)
+    assert all(record.turn_epoch == tag.turn_epoch for record in records)
+    assert all(record.speech_id == tag.speech_id for record in records)
+    assert len({record.trace_id for record in records}) == 1
+    anchors = [record.anchor for record in records]
+    assert anchors.count(Anchor.SPEAK_DECISION) == 1
+    assert anchors.count(Anchor.TALKER_CHUNK_READY) == 1
+    assert anchors.count(Anchor.CODE2WAV_FIRST_PCM) == 1
+    assert anchors.count(Anchor.PUBLISHED) == 2
+
+    report = waterfall(records)[()]
+    assert report["eou_to_speak_decision"]["n"] == 1
+    assert report["eou_to_first_pcm_local"]["n"] == 1
+    assert report["speak_decision_to_first_pcm"]["n"] == 1
+
+
+def test_runtime_barge_in_drops_stale_thinker_and_talker_before_downstream_work():
+    orchestrator = FakeOrchestrator()
+    sink = FakeSink()
+    runtime = RealtimeRuntime(orchestrator=orchestrator, sink=sink)
+
+    old_tag = runtime.begin_turn("speech-old")
+    runtime.begin_turn("speech-new")
+    assert runtime.submit_stage_output(old_tag, StageId.THINKER, {"hidden": "old"}) == []
+    assert runtime.submit_stage_output(old_tag, StageId.TALKER, [1, 2, 3]) == []
+
+    assert orchestrator.update_calls == []
+    assert sink.published == []
+
+
+def test_runtime_rejects_mismatched_speech_id_pcm_even_if_epoch_matches():
+    orchestrator = FakeOrchestrator()
+    sink = FakeSink()
+    runtime = RealtimeRuntime(orchestrator=orchestrator, sink=sink)
+
+    tag = runtime.begin_turn("speech-current")
+    request_id = orchestrator.initial_calls[0][0]
+    stale_speech = EpochTag(turn_epoch=tag.turn_epoch, speech_id="speech-other")
+    emitted_chunk = FakePipelineChunk(
+        stage=StageId.CODE2WAV,
+        payload=b"wrong-speech",
+        tag=stale_speech,
+    )
+    orchestrator.responses[(request_id, StageId.CODE2WAV)] = [emitted_chunk]
+
+    assert runtime.submit_stage_output(tag, StageId.CODE2WAV, b"unused") == [emitted_chunk]
+    assert sink.published == []
+
+
+def test_trace_pairing_does_not_cross_turns_after_barge_in(tmp_path):
+    trace_path = tmp_path / "runtime.jsonl"
+    sink = FakeSink()
+    with TraceRecorder(trace_path, session_id="rt-barge-pairing") as recorder:
+        runtime = RealtimeRuntime(
+            orchestrator=Orchestrator(codec_chunk_frames=1, codec_left_context_frames=0),
+            sink=sink,
+            trace_recorder=recorder,
+        )
+        old_tag = runtime.begin_turn("speech-old")
+        assert runtime.on_eou(old_tag)
+        new_tag = runtime.begin_turn("speech-new")
+        assert runtime.on_eou(new_tag)
+        runtime.submit_stage_output(new_tag, StageId.THINKER, {"hidden": "new"})
+        runtime.submit_stage_output(new_tag, StageId.TALKER, [7])
+        runtime.submit_stage_output(new_tag, StageId.CODE2WAV, b"new-pcm")
+
+    records = load_records(trace_path)
+    report = waterfall(records)[()]
+    assert report["eou_to_first_pcm_local"]["n"] == 1
+    assert report["barge_in_to_silence"]["n"] == 1
+    pcm_records = [record for record in records if record.anchor == Anchor.CODE2WAV_FIRST_PCM]
+    assert [(record.turn_epoch, record.speech_id) for record in pcm_records] == [
+        (new_tag.turn_epoch, new_tag.speech_id)
+    ]

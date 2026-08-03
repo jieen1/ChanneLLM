@@ -3,7 +3,8 @@
 
 音频按 duplex 协议流式喂入,每 chunk 跑官方口径的 listen/speak 决策;
 模型决定开口后累积回复 token + 隐层,轮末经 Talker(hidden_text_merge)
-与 Code2Wav 合成 24kHz 回复音频。全程自研引擎(音频编码器除外,
+与 Code2Wav 合成 24kHz 回复音频。这个脚本仍是回放验证，不能当作实时
+端到端延迟证据。全程自研引擎(音频编码器除外,
 策略同 vllm-omni:非热路径复用官方实现)。
 
 用法:
@@ -172,7 +173,7 @@ def main() -> int:
     t0 = time.time()
     codec_tokens = talker.generate_codec_tokens(
         cond_ids, cond_hidden, talker_kv,
-        max_new_tokens=args.max_codec_tokens, duplex=False,
+        max_new_tokens=args.max_codec_tokens, duplex=True,
     )
     torch.cuda.synchronize()
     tts_s = time.time() - t0
@@ -203,11 +204,18 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(args.out), wav, 24000)
-    rms = float(np.sqrt((wav**2).mean()))
-    print(f"[done] 已写入 {args.out} (rms={rms:.4f})")
-    spoke = not session.res_ids == []
-    ok = spoke and audio_s > 0.5 and rms > 0.01
-    print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke} 音频={audio_s:.1f}s")
+    from channellm.audio.quality import inspect_signal
+
+    quality = inspect_signal(wav, 24_000)
+    failures = quality.failures()
+    print(
+        f"[done] 已写入 {args.out} (rms={quality.rms:.4f}, peak={quality.peak:.4f}, "
+        f"clip={quality.clipped_ratio:.6f})"
+    )
+    spoke = bool(session.res_ids)
+    ok = spoke and not failures
+    detail = "; ".join(failures) if failures else "signal-integrity gate passed"
+    print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke}; {detail}")
     return 0 if ok else 1
 
 

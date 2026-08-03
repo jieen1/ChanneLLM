@@ -118,3 +118,18 @@ def test_orchestrator_prewarm_once_and_cancel_drops_pending_codec():
     orch.cancel("r1")
     assert state.codec_buffer == []
     assert orch.submit_update("r1", StageId.TALKER, [3]) == []
+
+
+def test_orchestrator_flushes_terminal_once_and_ignores_post_final_updates():
+    orch = Orchestrator(codec_chunk_frames=3, codec_left_context_frames=1)
+    state = orch.submit_initial("r1", turn_epoch=1)
+
+    emitted = orch.submit_update("r1", StageId.TALKER, [1, 2, 3, 4], final=True)
+
+    # 正常块消费 3 帧后，最后 1 帧作为上下文保留给尾包；不能提前丢掉，
+    # 否则 Code2Wav 在收尾处会断音。
+    assert [chunk.payload for chunk in emitted] == [(1, 2, 3, 4), (4,), None]
+    assert emitted[-1].final
+    assert StageId.TALKER in state.finished_stages
+    assert orch.submit_update("r1", StageId.TALKER, [5]) == []
+    assert orch.submit_update("r1", StageId.TALKER, final=True) == []

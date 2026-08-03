@@ -41,7 +41,7 @@ def test_build_condition_shapes() -> None:
     assert full.shape == (5, 64)  # 3 条件 + text_eos + audio_bos
 
     empty = talker.build_condition(torch.tensor([]), torch.zeros(0, 96))
-    assert empty.shape == (2, 64)  # 仅边界
+    assert empty.shape == (1, 64)  # 官方 duplex 回退:仅 audio_bos
 
 
 def test_generate_codec_loop_terminates() -> None:
