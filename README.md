@@ -44,8 +44,8 @@ make test && make lint            # 日常验证
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 官方单进程跑通 + 串行基线 waterfall | **核心完成**:transformers 5.14.1 兼容跑通;串行 EOU→首包 0.98–1.74s(n=3),见 `artifacts/p0/waterfall.md` |
-| P1 | 推理内核(三子模型加载、paged attention、调度、CUDA graph、prefix cache) | 未开始 |
-| P2 | 三阶段编排(九件事) | 未开始 |
+| P1 | 推理内核(三子模型加载、paged attention、调度、CUDA graph、prefix cache) | **核心完成**:Thinker/Talker/Code2Wav 自研 + fp32 逐 token 对齐 + 语音闭环,见 `docs/p1-p2-status.md`;CUDA graph/prefix cache 待做 |
+| P2 | 三阶段编排(九件事) | **进行中**:duplex 决策环 + 流式 TTS 分块合成已通(离线回放),实时节拍待接入 |
 | P3 | 双工会话控制(epoch 四处齐停) | 未开始 |
 | P4 | 应用层(事件存储/仲裁/Router/任务) | 未开始 |
 | P5 | LiveKit 远程 + iOS 真机 AEC 矩阵 | 未开始 |
