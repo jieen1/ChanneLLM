@@ -6,6 +6,7 @@ import torch
 
 from channellm.duplex.driver import DuplexPipelineDriver
 from channellm.duplex.runtime import RealtimeRuntime
+from channellm.engine.code2wav import PcmQualityError
 from channellm.pipeline.orchestrator import Orchestrator
 from channellm.pipeline.stages import PipelineChunk, StageId
 from channellm.tracing import Anchor, TraceRecorder, load_records
@@ -54,6 +55,12 @@ class FakeCode2Wav:
     def stream_chunk(self, tokens: list[int], last_chunk: bool = False) -> bytes:
         self.calls.append((tokens, last_chunk))
         return bytes(tokens)
+
+
+class FailingCode2Wav(FakeCode2Wav):
+    def stream_chunk(self, tokens: list[int], last_chunk: bool = False) -> bytes:
+        super().stream_chunk(tokens, last_chunk)
+        raise PcmQualityError("Token2wav PCM 质量门禁拒绝: peak 1.00000 > 0.99900")
 
 
 class FakeSink:
@@ -141,3 +148,21 @@ def test_driver_barge_in_purges_stale_interstage_queue_before_it_can_run() -> No
     driver.begin_turn("speech-new")
 
     assert driver.thinker_to_talker.qsize() == 0
+
+
+def test_driver_mutes_and_aborts_when_vocoder_pcm_fails_quality_gate() -> None:
+    sink = FakeSink()
+    runtime = RealtimeRuntime(Orchestrator(codec_chunk_frames=2, codec_left_context_frames=0), sink)
+    driver = DuplexPipelineDriver(
+        runtime,
+        FakeDuplexSession(FakeDecision(is_listen=False, end_of_turn=True)),
+        FakeTalkerStream(),
+        FailingCode2Wav(),
+    )
+    tag = driver.begin_turn("quality-failure")
+
+    driver.process_audio_chunk(tag, b"input")
+
+    assert runtime.active_tag is None
+    assert sink.published == []
+    assert sink.muted == 1

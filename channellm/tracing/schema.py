@@ -47,6 +47,7 @@ class Anchor:
     STREAMING_GENERATE_DONE = "streaming_generate_done"
     TALKER_CHUNK_READY = "talker_chunk_ready"  # 25 帧 codec 攒齐
     CODE2WAV_FIRST_PCM = "code2wav_first_pcm"  # 首个 PCM sample 产出
+    PCM_QUALITY_REJECTED = "pcm_quality_rejected"  # 硬门禁在发布前拒绝 PCM
 
     # 播放
     PUBLISHED = "published"  # 交给传输层

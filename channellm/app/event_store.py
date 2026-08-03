@@ -26,6 +26,7 @@ class EventKind(str, enum.Enum):
     USER_BACKCHANNEL_OBSERVED = "UserBackchannelObserved"
     AGENT_SPEECH_PLANNED = "AgentSpeechPlanned"
     AGENT_SPEECH_ACTUALLY_PLAYED = "AgentSpeechActuallyPlayed"  # 与 planned 分开
+    AGENT_SPEECH_REJECTED = "AgentSpeechRejected"  # PCM 硬门禁拒绝，未交付播放
     TASK_ENQUEUED = "TaskEnqueued"
     TASK_RESULT_READY = "TaskResultReady"
     SUPERSEDED = "Superseded"

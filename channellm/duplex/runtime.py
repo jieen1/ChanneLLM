@@ -280,6 +280,39 @@ class RealtimeRuntime:
             self._active = None
             return True
 
+    def abort_turn(self, tag: EpochTag, reason: str) -> bool:
+        """因不可安全播放的输出终止当前回复，不等待 GPU worker 收尾。
+
+        已经由设备取走的健康 PCM 仍是事实，不能倒写；尚在本地缓冲的内容会被
+        mute。后续同 epoch 的模型输出因 ``_active`` 已清空而无法再发布。
+        """
+        with self._lock:
+            active = self._active
+            if active is None or active.tag != tag or not self._is_current(tag):
+                return False
+            self.orchestrator.cancel(active.request_id)
+            self._cancelled_request_ids.append(active.request_id)
+            self.sink.mute()
+            self._anchor(
+                Anchor.PCM_QUALITY_REJECTED,
+                tag,
+                active.trace_id,
+                reason=reason,
+            )
+            self._anchor(Anchor.PLAYOUT_MUTED, tag, active.trace_id)
+            if self.event_store is not None:
+                self.event_store.append(
+                    EventKind.AGENT_SPEECH_REJECTED,
+                    payload={"reason": reason},
+                    turn_id=active.request_id,
+                    speech_id=tag.speech_id,
+                )
+            self._clear_playout_state(tag)
+            self.state_machine.on_barge_in()
+            self.state_machine.on_reply_done()
+            self._active = None
+            return True
+
     def _submit_to_orchestrator(
         self, request_id: str, stage: StageId, payload: Any, final: bool
     ) -> list[Any]:
@@ -335,7 +368,13 @@ class RealtimeRuntime:
         return self.epoch_guard.accept(tag)
 
     def _anchor(
-        self, anchor: str, tag: EpochTag, trace_id: str, *, ts_ns: int | None = None
+        self,
+        anchor: str,
+        tag: EpochTag,
+        trace_id: str,
+        *,
+        ts_ns: int | None = None,
+        **extra: Any,
     ) -> None:
         if self.trace_recorder is not None:
             self.trace_recorder.anchor(
@@ -344,6 +383,7 @@ class RealtimeRuntime:
                 turn_epoch=tag.turn_epoch,
                 speech_id=tag.speech_id,
                 ts_ns=ts_ns,
+                **extra,
             )
 
     def _new_trace_id(self) -> str:
@@ -366,13 +406,7 @@ class RealtimeRuntime:
         self._cancelled_request_ids.append(active.request_id)
         self.sink.mute()
         self._anchor(Anchor.PLAYOUT_MUTED, active.tag, active.trace_id)
-        self._playout_traces.pop(active.tag, None)
-        self._playout_requests.pop(active.tag, None)
-        self._playout_texts.pop(active.tag, None)
-        self._playout_played_event_seqs.pop(active.tag, None)
-        self._started_playout_tags.discard(active.tag)
-        if self._pending_playout == active.tag:
-            self._pending_playout = None
+        self._clear_playout_state(active.tag)
 
     def _barge_in_pending_playout(self, tag: EpochTag) -> None:
         trace_id = self._playout_traces.get(tag)
@@ -382,12 +416,16 @@ class RealtimeRuntime:
         self.sink.mute()
         if trace_id is not None:
             self._anchor(Anchor.PLAYOUT_MUTED, tag, trace_id)
+        self._clear_playout_state(tag)
+
+    def _clear_playout_state(self, tag: EpochTag) -> None:
         self._playout_traces.pop(tag, None)
         self._playout_requests.pop(tag, None)
         self._playout_texts.pop(tag, None)
         self._playout_played_event_seqs.pop(tag, None)
         self._started_playout_tags.discard(tag)
-        self._pending_playout = None
+        if self._pending_playout == tag:
+            self._pending_playout = None
 
 
 def _chunk_tag(chunk: Any, fallback: EpochTag) -> EpochTag:

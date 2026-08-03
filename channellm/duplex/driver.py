@@ -15,6 +15,7 @@ import torch
 
 from channellm.duplex.epoch import EpochTag
 from channellm.duplex.runtime import RealtimeRuntime
+from channellm.engine.code2wav import PcmQualityError
 from channellm.pipeline.stages import PipelineChunk, StageId
 from channellm.pipeline.transport import ChunkChannel
 
@@ -143,9 +144,13 @@ class DuplexPipelineDriver:
             if chunk.source is StageId.TALKER and chunk.payload is not None:
                 next_chunk = inputs[index + 1] if index + 1 < len(inputs) else None
                 is_last_audio_chunk = bool(next_chunk is not None and next_chunk.final)
-                wave = self.code2wav.stream_chunk(
-                    list(chunk.payload), last_chunk=is_last_audio_chunk
-                )
+                try:
+                    wave = self.code2wav.stream_chunk(
+                        list(chunk.payload), last_chunk=is_last_audio_chunk
+                    )
+                except PcmQualityError as exc:
+                    self.runtime.abort_turn(tag, str(exc))
+                    return
                 if _has_samples(wave):
                     self.runtime.submit_stage_output(tag, StageId.CODE2WAV, wave)
             elif chunk.source is StageId.TALKER and chunk.final:

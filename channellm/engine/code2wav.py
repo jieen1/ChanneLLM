@@ -19,6 +19,12 @@ from typing import Any
 import numpy as np
 import torch
 
+from channellm.audio.quality import inspect_signal
+
+
+class PcmQualityError(RuntimeError):
+    """Token2wav 产物违反播放前的硬完整性门禁。"""
+
 
 class Code2Wav:
     def __init__(
@@ -83,12 +89,19 @@ class Code2Wav:
 
 
 def _validated_waveform(wave: Any, sample_rate: int | None = None) -> np.ndarray:
-    """在 PCM 进入媒体层前验证 vocoder 的不变量，不改变有效波形。"""
+    """在 PCM 进入媒体层前执行无损的硬完整性门禁。
+
+    流式块可以短于一段完整话语，也允许静音收尾，所以这里不对时长或 RMS
+    做判断。接近满幅、削波、直流偏置和突变则在任意块长度下都可能造成可听
+    伪影，必须在 publish 前拒绝；整段可懂度/自然度仍由离线质检和人工回放负责。
+    """
     if sample_rate is not None and sample_rate != 24_000:
-        raise RuntimeError(f"Token2wav 应输出 24kHz,得到 {sample_rate}")
+        raise PcmQualityError(f"Token2wav 应输出 24kHz,得到 {sample_rate}")
     samples = np.asarray(wave, dtype=np.float32).reshape(-1)
-    if not np.isfinite(samples).all():
-        raise RuntimeError("Token2wav 输出包含非有限 PCM sample")
+    quality = inspect_signal(samples, 24_000)
+    failures = quality.failures(min_duration_s=0.0, min_rms=0.0, max_peak=0.98)
+    if failures:
+        raise PcmQualityError("Token2wav PCM 质量门禁拒绝: " + "; ".join(failures))
     return samples
 
 

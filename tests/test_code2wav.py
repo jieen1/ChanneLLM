@@ -7,7 +7,7 @@ import pytest
 import soundfile as sf
 import torch
 
-from channellm.engine.code2wav import Code2Wav
+from channellm.engine.code2wav import Code2Wav, PcmQualityError
 
 
 class _FakeToken2Wav:
@@ -45,12 +45,30 @@ def test_stream_chunk_accepts_finite_24khz_wav_bytes() -> None:
 def test_stream_chunk_rejects_wrong_wav_sample_rate_before_playback() -> None:
     code2wav = _streaming_code2wav(_wav_bytes(np.zeros(8, dtype=np.float32), 16_000))
 
-    with pytest.raises(RuntimeError, match="应输出 24kHz,得到 16000"):
+    with pytest.raises(PcmQualityError, match="应输出 24kHz,得到 16000"):
         code2wav.stream_chunk([1])
 
 
 def test_stream_chunk_rejects_nonfinite_tensor_before_playback() -> None:
     code2wav = _streaming_code2wav(torch.tensor([0.0, float("nan")]))
 
-    with pytest.raises(RuntimeError, match="非有限 PCM"):
+    with pytest.raises(PcmQualityError, match="contains non-finite"):
+        code2wav.stream_chunk([1])
+
+
+@pytest.mark.parametrize(
+    ("wave", "failure"),
+    [
+        (torch.tensor([0.0, 1.0]), "peak 1.00000"),
+        (torch.tensor([0.0, 0.99]), "peak 0.99000 > 0.98000"),
+        (torch.tensor([0.0, 0.9]), "sample step 0.90000"),
+        (torch.full((8,), 0.2), "dc offset 0.20000"),
+    ],
+)
+def test_stream_chunk_rejects_audible_pcm_integrity_failures_before_playback(
+    wave: torch.Tensor, failure: str
+) -> None:
+    code2wav = _streaming_code2wav(wave)
+
+    with pytest.raises(PcmQualityError, match=failure):
         code2wav.stream_chunk([1])

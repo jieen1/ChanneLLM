@@ -228,6 +228,35 @@ def test_runtime_does_not_log_buffered_but_never_played_pcm_as_actual_audio(tmp_
     assert sink.muted_items == 1
 
 
+def test_runtime_aborts_unsafe_pcm_without_waiting_for_worker_cleanup(tmp_path):
+    orchestrator = FakeOrchestrator()
+    sink = FakeSink()
+    trace_path = tmp_path / "runtime.jsonl"
+    with TraceRecorder(trace_path) as recorder, EventStore(tmp_path / "events.sqlite") as store:
+        runtime = RealtimeRuntime(orchestrator, sink, recorder, store)
+        tag = runtime.begin_turn("unsafe-pcm")
+        request_id = orchestrator.initial_calls[0][0]
+        assert runtime.abort_turn(tag, "peak 1.00000 > 0.99900")
+        events = list(store.iterate())
+
+    rejection = next(
+        record
+        for record in load_records(trace_path)
+        if record.anchor == Anchor.PCM_QUALITY_REJECTED
+    )
+
+    assert runtime.active_tag is None
+    assert sink.mute_calls == 1
+    assert orchestrator.cancel_calls == [request_id]
+    assert orchestrator.cleanup_calls == []
+    assert runtime.reap_cancelled() == 1
+    assert orchestrator.cleanup_calls == [request_id]
+    assert [(event.kind, event.payload) for event in events] == [
+        (EventKind.AGENT_SPEECH_REJECTED.value, {"reason": "peak 1.00000 > 0.99900"})
+    ]
+    assert rejection.extra == {"reason": "peak 1.00000 > 0.99900"}
+
+
 def test_runtime_only_publishes_code2wav_pcm_not_interstage_codec(tmp_path):
     orchestrator = Orchestrator(codec_chunk_frames=2, codec_left_context_frames=0)
     sink = FakeSink()
