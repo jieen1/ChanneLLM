@@ -4,6 +4,8 @@ model:
   repo: openbmb/MiniCPM-o-4_5
   dtype: bfloat16
   attn_implementation: sdpa   # SM120 上先 sdpa,flash_attention_2 需要单独验证
+  # TTS 默认音色参考音频(来自 MiniCPM-o-Demo,Apache 2.0;不复制二进制,原地引用)
+  tts_ref_audio: ~/project/MiniCPM-o-Demo/assets/ref_audio/ref_minicpm_signature.wav
 audio:
   sample_rate: 16000
   chunk_seconds: 1.0          # = config.audio_chunk_length

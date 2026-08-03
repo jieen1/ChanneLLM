@@ -43,6 +43,10 @@ python scripts/p0_waterfall.py traces/p0_serial_*.jsonl \
 
 ## 已知陷阱
 
+- **transformers 版本冲突:** 官方 modeling 代码按 transformers==4.51.0 开发
+  (MiniCPM-o-Demo requirements);本仓库主契约是 >=5(BlackweLLM 谱系)。
+  若官方代码在 transformers 5 下加载失败:为 P0 单独建 venv 钉 4.51.0
+  (R6 逐个解),并在本文档记录结论;不要在主 venv 里降级。
 - attn 默认 `sdpa`;`flash_attention_2` 在 SM120 需单独构建验证。
 - 官方 `streaming_generate` 自带 `cost_llm/cost_tts/cost_token2wav` 分段耗时,
   已随锚点落库 —— 与本仓库锚点交叉验证,不要互相覆盖结论。
