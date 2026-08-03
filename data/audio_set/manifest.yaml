@@ -1,0 +1,9 @@
+# P0 固定回放集清单 —— 录音就位后逐条填充
+# eou_offset_s = 人工标注的用户说完时刻(秒),是 EOU_TO_FIRST_AUDIO 的权威口径。
+items: []
+# 示例:
+# items:
+#   - path: pause-think-001.wav
+#     category: pause-think
+#     eou_offset_s: 6.2
+#     transcript: "我在想……这个方案能不能先只做语音记录。"

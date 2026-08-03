@@ -1,0 +1,23 @@
+# P2 三阶段流水线参数基线(设计文档 §4;参考 vllm-omni deploy 配置)
+# 注意:这是起始值,共驻测量矩阵(§8 六场景)之后校准。
+stages:
+  thinker:
+    memory_frac: 0.55
+  talker:
+    memory_frac: 0.15
+    kv_bytes_fixed: 2147483648   # 2 GiB 钉死(参考基线)
+  code2wav:
+    memory_frac: 0.15
+    enforce_eager: true          # 参考实现未捕获 CUDA graph —— 我们的杠杆 #4
+transport:
+  codec_chunk_frames: 25         # 首包延迟主旋钮(杠杆 #5)
+  codec_left_context_frames: 3
+  queue_capacity: 16
+  first_timeout_s: 3.0
+  next_timeout_s: 0.3
+  overrun_policy: drop_oldest
+qos:
+  # Talker 单 token 解码延迟敏感;Code2Wav 吞吐敏感 —— 必须隔离(§8 计算 QoS)
+  talker_stream_priority: high
+  code2wav_stream_priority: normal
+  max_concurrent_code2wav: 1

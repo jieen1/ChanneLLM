@@ -1,0 +1,17 @@
+# P0 串行基线 —— 官方单进程 MiniCPMODuplex(设计文档 §9 P0)
+# 这一配置产出后续所有优化的对照系:EOU → 首个 PCM 分段数据。
+model:
+  repo: openbmb/MiniCPM-o-4_5
+  dtype: bfloat16
+  attn_implementation: sdpa   # SM120 上先 sdpa,flash_attention_2 需要单独验证
+audio:
+  sample_rate: 16000
+  chunk_seconds: 1.0          # = config.audio_chunk_length
+generate:
+  max_new_speak_tokens_per_chunk: 20
+  temperature: 0.7
+  top_k: 100
+  top_p: 0.8
+tracing:
+  out_dir: traces/
+  group_by: [temp, loc]
