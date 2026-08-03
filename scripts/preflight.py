@@ -11,6 +11,13 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
+from pathlib import Path
+
+# 直接执行 ``python scripts/preflight.py`` 时，Python 只会把 scripts/ 放进
+# sys.path；把仓库根加入路径，才能按文档运行并给出环境诊断，而不是导入崩溃。
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 REQUIRE_PY = (3, 10)
 EXPECT_CAPABILITY = (12, 0)  # SM120 Blackwell

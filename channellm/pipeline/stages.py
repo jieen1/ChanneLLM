@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+from typing import Any
 
 
 class StageId(str, enum.Enum):
@@ -21,6 +22,23 @@ PIPELINE_ORDER = (StageId.THINKER, StageId.TALKER, StageId.CODE2WAV)
 # vllm-omni 基线参数(deploy/minicpmo_4_5.yaml,实测后校准)
 CODEC_CHUNK_FRAMES = 25  # 首包延迟主旋钮
 CODEC_LEFT_CONTEXT_FRAMES = 3
+
+
+@dataclasses.dataclass(frozen=True)
+class PipelineChunk:
+    """发往某个 stage 的增量输入或其最终输出。
+
+    ``stage`` 始终是消费者 stage。Code2Wav 的 chunk 同时也是编排层交给
+    播放层的 PCM 产物；这样所有跨层数据都有同一组 epoch 标识，旧轮次不会
+    因为队列中残留而穿透到播放端。
+    """
+
+    stage: StageId
+    source: StageId | None = None
+    payload: Any = None
+    turn_epoch: int = 0
+    speech_id: str = ""
+    final: bool = False
 
 
 @dataclasses.dataclass
@@ -38,3 +56,7 @@ class StageRequestState:
     stage_request_ids: dict[StageId, str] = dataclasses.field(default_factory=dict)
     finished_stages: set[StageId] = dataclasses.field(default_factory=set)
     cancelled: bool = False
+    # Talker 产出的 codec token 必须攒到 Code2Wav 的处理单元。这个缓冲只
+    # 属于该请求，绝不能跨 turn 复用。
+    codec_buffer: list[Any] = dataclasses.field(default_factory=list)
+    terminal_emitted: bool = False

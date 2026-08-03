@@ -43,7 +43,7 @@ class EpochGuard:
         """旧 epoch 无条件丢弃;未 advance 过时一切皆旧。"""
         if self._current is None:
             return True
-        return tag.turn_epoch != self._current.turn_epoch
+        return tag != self._current
 
     def accept(self, tag: EpochTag) -> bool:
         return not self.is_stale(tag)

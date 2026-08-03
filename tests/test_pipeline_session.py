@@ -1,7 +1,7 @@
 from channellm.duplex.session import SessionStateMachine, TurnPhase
 from channellm.models.minicpmo import FACTS, find_weights
 from channellm.pipeline.orchestrator import Orchestrator, new_request_id
-from channellm.pipeline.stages import StageId, StageRequestState
+from channellm.pipeline.stages import PipelineChunk, StageId, StageRequestState
 
 
 def test_orchestrator_identity_and_cancel():
@@ -10,6 +10,7 @@ def test_orchestrator_identity_and_cancel():
     state = orch.submit_initial(request_id, turn_epoch=1, speech_id="s1")
     assert isinstance(state, StageRequestState)
     assert state.request_id == request_id
+    assert state.stage_request_ids[StageId.THINKER] == f"{request_id}:thinker"
     orch.cancel(request_id)
     assert orch._requests[request_id].cancelled
     orch.cleanup(request_id)
@@ -61,3 +62,59 @@ def test_stage_pipeline_order():
     from channellm.pipeline.stages import PIPELINE_ORDER
 
     assert PIPELINE_ORDER == (StageId.THINKER, StageId.TALKER, StageId.CODE2WAV)
+
+
+def test_orchestrator_incrementally_routes_and_flushes_codec_tail():
+    orch = Orchestrator(codec_chunk_frames=2, codec_left_context_frames=1)
+    orch.submit_initial("r1", turn_epoch=4, speech_id="s4")
+
+    thinker = orch.submit_update("r1", StageId.THINKER, {"hidden": "h"})
+    assert thinker == [
+        PipelineChunk(
+            stage=StageId.TALKER,
+            source=StageId.THINKER,
+            payload={"hidden": "h"},
+            turn_epoch=4,
+            speech_id="s4",
+        )
+    ]
+
+    assert orch.submit_update("r1", StageId.TALKER, [1, 2]) == []
+    codec = orch.submit_update("r1", StageId.TALKER, [3])
+    assert codec[0].stage is StageId.CODE2WAV
+    assert codec[0].source is StageId.TALKER
+    assert codec[0].payload == (1, 2, 3)
+
+    tail = orch.submit_update("r1", StageId.TALKER, [4], final=True)
+    assert [chunk.payload for chunk in tail] == [(3, 4), None]
+    assert tail[-1].final
+
+    pcm = orch.submit_update("r1", StageId.CODE2WAV, b"pcm")
+    assert pcm[0].source is StageId.CODE2WAV
+    assert pcm[0].payload == b"pcm"
+    terminal = orch.submit_update("r1", StageId.CODE2WAV, final=True)
+    assert terminal == [
+        PipelineChunk(
+            stage=StageId.CODE2WAV,
+            source=StageId.CODE2WAV,
+            turn_epoch=4,
+            speech_id="s4",
+            final=True,
+        )
+    ]
+    assert orch.submit_update("r1", StageId.CODE2WAV, final=True) == []
+
+
+def test_orchestrator_prewarm_once_and_cancel_drops_pending_codec():
+    orch = Orchestrator()
+    seen: list[StageId] = []
+    orch.prewarm(seen.append)
+    orch.prewarm(seen.append)
+    assert seen == [StageId.TALKER, StageId.CODE2WAV]
+
+    state = orch.submit_initial("r1", turn_epoch=1)
+    orch.submit_update("r1", StageId.TALKER, [1, 2])
+    assert state.codec_buffer == [1, 2]
+    orch.cancel("r1")
+    assert state.codec_buffer == []
+    assert orch.submit_update("r1", StageId.TALKER, [3]) == []
