@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "channellm"
+version = "0.1.0"
+description = "ChanneLLM — 单卡 SM120 自研全双工语音 runtime(MiniCPM-o 4.5 端到端,sparkinfer 内核)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+# 核心层(L0-L4)的纯 CPU 依赖:测量、事件存储、音频分块等基础设施可在无 GPU 环境开发与测试。
+dependencies = [
+  "numpy>=2,<3",
+  "pyyaml>=6,<7",
+  "soundfile>=0.12,<1",
+]
+
+[project.optional-dependencies]
+# --- SM120 版本契约 ---------------------------------------------------------
+# 与 qwen-sm120-runtime(BlackweLLM)共享 SM120 环境经验,在其参考环境上验证过:
+# RTX PRO 6000 Blackwell Max-Q 96GB,driver 610.47,CUDA 13.x。
+# torch 精确钉版;sparkinfer 以 editable 方式从 fork 安装(见 scripts/setup_env.sh),
+# 因为它是本项目共同深度优化的内核面,不作为 PyPI 依赖声明。
+cuda = [
+  "torch==2.13.0",
+  "triton>=3.6,<4",
+  "transformers>=5,<6",
+  "huggingface_hub>=1,<2",
+  "safetensors>=0.7,<1",
+]
+dev = ["pytest>=8,<9", "ruff>=0.8,<1"]
+
+[tool.setuptools.packages.find]
+include = ["channellm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+# UP042/UP046 需要 py311+/py312+ 语法,与 requires-python>=3.10 冲突
+ignore = ["UP042", "UP046"]

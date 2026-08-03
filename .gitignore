@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+.env
+
+# Runtime artifacts
+artifacts/
+logs/
+*.log
+traces/
+*.sqlite
+*.sqlite-*
+*.wav
+*.pcm
+!tests/fixtures/**
+
+# OMX / agent state
+.omx/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Kernel JIT caches (sparkinfer / cutlass-dsl)
+.cutlass_cache/
