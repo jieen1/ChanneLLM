@@ -9,6 +9,14 @@ cd "$(dirname "$0")/.."
 SPARKINFER_PATH="${SPARKINFER_PATH:-$HOME/project/sparkinfer}"
 PY=".venv/bin/python"
 
+# 国内源默认开启(阿里云);PYPI_MIRROR="" 可回退官方源。
+# 注意:HF 权重下载另算 —— Xet 仓库禁用 hf-mirror(见 docs/environment.md)。
+PYPI_MIRROR="${PYPI_MIRROR:-https://mirrors.aliyun.com/pypi/simple/}"
+if [ -n "$PYPI_MIRROR" ]; then
+    export UV_DEFAULT_INDEX="$PYPI_MIRROR"
+    echo "==> using PyPI mirror: $PYPI_MIRROR"
+fi
+
 if ! command -v uv >/dev/null 2>&1; then
     echo "ERROR: uv not found (https://docs.astral.sh/uv/)" >&2
     exit 1
@@ -25,7 +33,7 @@ if [ "${1:-}" != "--base" ]; then
     echo "==> cuda extra (torch==2.13.0 钉版)"
     uv pip install --python "$PY" -e ".[cuda]"
 
-    echo "==> sparkinfer fork (editable): $SPARKINFER_PATH"
+    echo "==> sparkinfer fork (editable,依赖同样走镜像): $SPARKINFER_PATH"
     if [ -d "$SPARKINFER_PATH" ]; then
         uv pip install --python "$PY" -e "$SPARKINFER_PATH"
     else
