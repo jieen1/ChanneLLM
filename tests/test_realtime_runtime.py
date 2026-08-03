@@ -214,6 +214,23 @@ def test_runtime_finish_turn_resets_terminal_no_output_state(tmp_path):
     assert events == []
 
 
+def test_runtime_records_speak_decision_without_pcm_as_not_produced(tmp_path):
+    orchestrator = FakeOrchestrator()
+    with EventStore(tmp_path / "events.sqlite") as store:
+        runtime = RealtimeRuntime(orchestrator=orchestrator, sink=FakeSink(), event_store=store)
+        tag = runtime.begin_turn("empty-speech")
+        assert runtime.on_speak_decision(tag)
+        assert runtime.finish_turn(tag)
+        events = list(store.iterate())
+
+    assert [(event.kind, event.payload) for event in events] == [
+        (
+            EventKind.AGENT_SPEECH_NOT_PRODUCED.value,
+            {"reason": "speak_decision_without_pcm"},
+        )
+    ]
+
+
 def test_runtime_does_not_log_buffered_but_never_played_pcm_as_actual_audio(tmp_path):
     sink = BufferedPlaybackSink()
     with EventStore(tmp_path / "events.sqlite") as store:

@@ -106,7 +106,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     应用保形归一化后的十轮真实权重复测中，9 轮产生 PCM，全部通过硬门禁与复核
     （RMS 0.0718–0.1093、peak 0.4612–0.9424、最大采样步长 0.1632–0.7209），
     没有 `PCM_QUALITY_REJECTED`；第 4 轮在模型已作出 speak decision 后没有产生
-    codec/PCM，属于独立的 Talker 空输出可用性风险，不能归为音频质量通过。
+    codec/PCM，属于独立的 Talker 空输出可用性风险，不能归为音频质量通过。该状态
+    现在会落为 `AgentSpeechNotProduced`（原因 `speak_decision_without_pcm`）而非伪造
+    `AgentSpeechActuallyPlayed`，以便上层选择安全重试或文字/通知降级。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 

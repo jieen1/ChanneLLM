@@ -276,6 +276,12 @@ class RealtimeRuntime:
                 finish = getattr(self.sink, "finish", None)
                 if callable(finish):
                     finish(tag)
+            elif active.speak_decision:
+                self._event(
+                    EventKind.AGENT_SPEECH_NOT_PRODUCED,
+                    active,
+                    payload={"reason": "speak_decision_without_pcm"},
+                )
             self.state_machine.on_reply_done()
             self._active = None
             return True
@@ -391,10 +397,17 @@ class RealtimeRuntime:
             return self.trace_recorder.new_trace()
         return uuid.uuid4().hex[:16]
 
-    def _event(self, kind: EventKind, active: _ActiveTurn) -> None:
+    def _event(
+        self,
+        kind: EventKind,
+        active: _ActiveTurn,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         if self.event_store is not None:
             self.event_store.append(
                 kind,
+                payload=payload,
                 turn_id=active.request_id,
                 speech_id=active.tag.speech_id,
             )
