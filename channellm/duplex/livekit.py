@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 
 from channellm.duplex.epoch import EpochTag
+from channellm.duplex.ingress import PcmIngress
 from channellm.duplex.playback import BufferedPlaybackSink
 
 INPUT_SAMPLE_RATE = 16_000
@@ -115,6 +116,34 @@ class LiveKitAudioInput:
                 result = close()
                 if inspect.isawaitable(result):
                     await result
+
+    async def forward_segment(
+        self,
+        track: Any,
+        ingress: PcmIngress,
+        *,
+        speech_id: str = "",
+    ) -> EpochTag:
+        """转发一个已经由客户端/VAD 确认边界的语音段。
+
+        LiveKit 音轨本身是连续的，不能把临时网络关闭或订阅错误伪造为用户 EOU。
+        调用方须为每个已确认段调用一次本方法；只有迭代器正常结束才补齐尾块并提交
+        EOU。异常会原样抛出，以便上层取消该 epoch 或重建订阅。
+        """
+        tag = ingress.begin_speech(speech_id)
+        completed = False
+        try:
+            async for frame in self.frames(track):
+                ingress.push_frame(
+                    frame.samples,
+                    sample_rate=frame.sample_rate,
+                    channels=frame.channels,
+                )
+            completed = True
+        finally:
+            if completed:
+                ingress.end_speech()
+        return tag
 
 
 class LiveKitAudioOutput:

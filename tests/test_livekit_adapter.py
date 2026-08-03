@@ -107,6 +107,25 @@ class _Rtc:
     Room = _Room
 
 
+class _Ingress:
+    def __init__(self) -> None:
+        self.begun: list[str] = []
+        self.frames: list[tuple[np.ndarray, int, int]] = []
+        self.ended = 0
+
+    def begin_speech(self, speech_id: str) -> EpochTag:
+        self.begun.append(speech_id)
+        return EpochTag(7, speech_id)
+
+    def push_frame(self, samples: np.ndarray, *, sample_rate: int, channels: int) -> int:
+        self.frames.append((samples, sample_rate, channels))
+        return 0
+
+    def end_speech(self) -> bool:
+        self.ended += 1
+        return True
+
+
 def test_output_preserves_pcm_geometry_and_publishes_track() -> None:
     room = _Room()
     output = asyncio.run(LiveKitAudioOutput.create_and_publish(room, rtc_module=_Rtc))
@@ -149,6 +168,21 @@ def test_input_requests_16khz_mono_and_copies_frame_samples() -> None:
     assert frames[0].sample_rate == INPUT_SAMPLE_RATE
     assert frames[0].channels == 1
     np.testing.assert_array_equal(frames[0].samples, [1, 2])
+
+
+def test_forward_segment_flushes_only_normally_terminated_speech() -> None:
+    ingress = _Ingress()
+    tag = asyncio.run(
+        LiveKitAudioInput(_Rtc).forward_segment(object(), ingress, speech_id="remote-speech")
+    )
+
+    assert tag == EpochTag(7, "remote-speech")
+    assert ingress.begun == ["remote-speech"]
+    assert ingress.ended == 1
+    assert len(ingress.frames) == 1
+    samples, sample_rate, channels = ingress.frames[0]
+    np.testing.assert_array_equal(samples, [1, 2])
+    assert (sample_rate, channels) == (INPUT_SAMPLE_RATE, 1)
 
 
 def test_received_pcm_rejects_malformed_geometry() -> None:
