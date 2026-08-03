@@ -181,11 +181,37 @@ class Thinker(nn.Module):
             positions = torch.arange(
                 kv.prefix_len, kv.prefix_len + seq_len, device=token_ids.device
             )
+        hidden = self.embed_tokens(token_ids)
+        return self._core(hidden, kv, positions, output_hidden_states)
+
+    @torch.no_grad()
+    def forward_embeds(
+        self,
+        embeds: torch.Tensor,
+        kv: KVBackend,
+        positions: torch.Tensor | None = None,
+        output_hidden_states: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """embeds: [S, hidden] 直接前向(音频/多模态 embedding 入口)。"""
+        seq_len = embeds.shape[0]
+        kv.begin_step(seq_len)
+        if positions is None:
+            positions = torch.arange(
+                kv.prefix_len, kv.prefix_len + seq_len, device=embeds.device
+            )
+        return self._core(embeds, kv, positions, output_hidden_states)
+
+    def _core(
+        self,
+        hidden: torch.Tensor,
+        kv: KVBackend,
+        positions: torch.Tensor,
+        output_hidden_states: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         cos, sin = self.rotary(positions, dtype=self.embed_tokens.weight.dtype)
         cos = cos.unsqueeze(1)  # [S, 1, dim] 广播 heads
         sin = sin.unsqueeze(1)
 
-        hidden = self.embed_tokens(token_ids)
         hiddens: list[torch.Tensor] = [hidden] if output_hidden_states else []
         for layer_idx, layer in enumerate(self.layers):
             hidden = layer(hidden, cos, sin, kv, layer_idx)
