@@ -44,13 +44,18 @@ def load_model(model_dir: Path, device: str, attn_implementation: str):
     from transformers import AutoConfig, AutoModel
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-    from channellm.models.minicpmo_compat import patch_config, patch_model_class
+    from channellm.models.minicpmo_compat import (
+        patch_config,
+        patch_dynamic_cache,
+        patch_model_class,
+    )
 
     # 权重目录的 modeling 代码是带相对导入的动态模块包,只能经
     # transformers 的 auto_map 机制加载,不能直接 sys.path import。
     config = patch_config(
         AutoConfig.from_pretrained(str(model_dir), trust_remote_code=True)
     )
+    patch_dynamic_cache()
     model_cls = get_class_from_dynamic_module(config.auto_map["AutoModel"], str(model_dir))
     patch_model_class(model_cls)
     model = AutoModel.from_pretrained(

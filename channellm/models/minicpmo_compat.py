@@ -51,3 +51,86 @@ def patch_model_class(model_cls: type) -> type:
 
     model_cls.__init__ = patched_init
     return model_cls
+
+# ---------------------------------------------------------------------------
+# DynamicCache.key_cache / value_cache 兼容层
+#
+# 官方 utils.py/modeling_minicpmo.py 共 38 处按 transformers 4.x 的
+# DynamicCache 接口读写 key_cache/value_cache(list of per-layer tensors);
+# transformers 5 改成 .layers: list[DynamicLayer](layer.keys/.values)。
+# 官方重赋值语义经核实均为"全层替换、两列表等长"(窗口截取/rotary 重对齐/
+# 拼接),因此 setter 可安全地按给定列表重建 layers。
+# ---------------------------------------------------------------------------
+
+
+class _CacheTensorListView:
+    """让 cache.key_cache / cache.value_cache 继续按 4.x 的列表语义使用。"""
+
+    def __init__(self, cache: Any, which: str) -> None:
+        self._cache = cache
+        self._which = which  # 'keys' or 'values'
+
+    def __len__(self) -> int:
+        return len(self._cache.layers)
+
+    def __iter__(self):
+        for layer in self._cache.layers:
+            yield getattr(layer, self._which)
+
+    def __getitem__(self, idx):
+        return getattr(self._cache.layers[idx], self._which)
+
+    def __setitem__(self, idx, tensor) -> None:
+        setattr(self._cache.layers[idx], self._which, tensor)
+
+    def __bool__(self) -> bool:
+        return len(self._cache.layers) > 0
+
+
+def _rebuild_layers(cache: Any, tensors, which: str) -> None:
+    """全层替换。官方重赋值语义经核实均为等长列表(窗口截取/rotary 重对齐/拼接)。"""
+    from transformers.cache_utils import DynamicLayer
+
+    tensors = list(tensors)
+    layers = cache.layers
+    while len(layers) < len(tensors):
+        layers.append(DynamicLayer())
+    del layers[len(tensors):]
+    for layer, tensor in zip(layers, tensors):
+        setattr(layer, which, tensor)
+
+
+def patch_dynamic_cache() -> None:
+    """给 transformers 5 的 DynamicCache 补回 4.x 的 key/value_cache 接口。
+
+    transformers 4.x 上实例自带 key_cache 属性,检测到即跳过,保持幂等。
+    """
+    from transformers.cache_utils import DynamicCache
+
+    if hasattr(DynamicCache(), "key_cache"):
+        return  # transformers 4.x:原生接口
+    if getattr(DynamicCache, "_channellm_compat", False):
+        return
+
+    def key_cache_getter(self):
+        return _CacheTensorListView(self, "keys")
+
+    def key_cache_setter(self, tensors):
+        _rebuild_layers(self, tensors, "keys")
+
+    def value_cache_getter(self):
+        return _CacheTensorListView(self, "values")
+
+    def value_cache_setter(self, tensors):
+        _rebuild_layers(self, tensors, "values")
+
+    DynamicCache.key_cache = property(key_cache_getter, key_cache_setter)
+    DynamicCache.value_cache = property(value_cache_getter, value_cache_setter)
+    DynamicCache._channellm_compat = True
+
+    if not hasattr(DynamicCache, "get_usable_length"):
+        # 4.x 语义:无 sliding window 时即该层已缓存长度(Whisper encoder 用)
+        def get_usable_length(self, new_seq_length: int, layer_idx: int = 0) -> int:
+            return self.get_seq_length(layer_idx)
+
+        DynamicCache.get_usable_length = get_usable_length
