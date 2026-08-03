@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
+from channellm.app.event_store import EventKind, EventStore
 from channellm.duplex.epoch import EpochTag
 from channellm.duplex.livekit import (
     INPUT_SAMPLE_RATE,
@@ -17,6 +18,10 @@ from channellm.duplex.livekit import (
     pcm_to_int16_bytes,
     received_pcm,
 )
+from channellm.duplex.playback import AsyncPcmPlayoutPump
+from channellm.duplex.runtime import RealtimeRuntime
+from channellm.pipeline.orchestrator import Orchestrator
+from channellm.pipeline.stages import StageId
 
 
 @dataclass
@@ -156,3 +161,26 @@ def test_connect_room_is_outbound_and_requires_credentials() -> None:
     assert room.connected == ("wss://example.test", "token")
     with pytest.raises(ValueError, match="required"):
         asyncio.run(connect_room("", "token", rtc_module=_Rtc))
+
+
+def test_runtime_async_livekit_path_records_played_only_after_capture(tmp_path) -> None:
+    output, _track = LiveKitAudioOutput.create(rtc_module=_Rtc)
+    sink = LiveKitBufferedPlaybackSink(output)
+    with EventStore(tmp_path / "events.sqlite") as store:
+        runtime = RealtimeRuntime(Orchestrator(), sink, event_store=store)
+        tag = runtime.begin_turn("livekit-output")
+        runtime.submit_stage_output(
+            tag,
+            StageId.CODE2WAV,
+            np.array([0.0, 0.25, -0.25], dtype=np.float32),
+        )
+        assert runtime.finish_turn(tag)
+        assert asyncio.run(AsyncPcmPlayoutPump(sink, runtime, output.write).pump()) == 1
+        events = list(store.iterate())
+
+    assert [event.kind for event in events] == [
+        EventKind.AGENT_SPEECH_PLANNED.value,
+        EventKind.AGENT_SPEECH_ACTUALLY_PLAYED.value,
+    ]
+    assert len(output.source.frames) == 1
+    assert output.source.frames[0].sample_rate == OUTPUT_SAMPLE_RATE
