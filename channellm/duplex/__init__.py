@@ -1,3 +1,4 @@
+from channellm.duplex.aec_policy import AecStatus, AudioInteractionMode, choose_audio_interaction
 from channellm.duplex.epoch import EpochGuard, EpochTag
 from channellm.duplex.ingress import PcmIngress
 from channellm.duplex.livekit import (
@@ -18,6 +19,9 @@ __all__ = [
     "LiveKitBufferedPlaybackSink",
     "EpochGuard",
     "EpochTag",
+    "AecStatus",
+    "AudioInteractionMode",
+    "choose_audio_interaction",
     "PcmIngress",
     "PlaybackSink",
     "QueuedDuplexRuntime",
