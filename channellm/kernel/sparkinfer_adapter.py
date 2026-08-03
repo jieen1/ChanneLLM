@@ -62,7 +62,7 @@ def probe() -> KernelProbe:
     list_ops = getattr(sparkinfer, "list_ops", None)
     if callable(list_ops):
         try:
-            ops = tuple(sorted(list_ops()))
+            ops = tuple(sorted(_op_qualname(op) for op in list_ops()))
         except Exception as exc:  # noqa: BLE001
             return KernelProbe(available=False, error=f"list_ops failed: {exc}")
 
@@ -87,3 +87,12 @@ def get_op(name: str) -> Any | None:
         if obj is None:
             return None
     return obj
+
+
+def _op_qualname(op: Any) -> str:
+    """list_ops() 返回 OpMeta 数据类;归一成 'group.name' 字符串。"""
+    if isinstance(op, str):
+        return op
+    group = getattr(op, "group", "")
+    name = getattr(op, "name", str(op))
+    return f"{group}.{name}" if group else name

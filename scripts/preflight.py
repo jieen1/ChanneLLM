@@ -53,7 +53,7 @@ def check_torch(report: Report, required: bool) -> object | None:
     if torch is None:
         report.add("torch", "FAIL" if required else "WARN", err or "not installed")
         return None
-    detail = f"{torch.__version__} cuda={torch.version_cuda}"
+    detail = f"{torch.__version__} cuda={torch.version.cuda}"
     if not torch.cuda.is_available():
         report.add("torch", "FAIL" if required else "WARN", detail + " (cuda unavailable)")
         return torch
