@@ -78,6 +78,11 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     读取当前 session epoch 的有效 `ContextSnapshot` 与未收到 `TaskResultReady` 的
     任务，绝不恢复未播放 PCM 或 `AgentSpeechPlanned`。这完成本地 crash-recovery
     的事实边界，不等价于恢复 GPU KV、设备缓冲或远端媒体会话。
+12. **媒体输入质量边界**:`PcmIngress` 只接受已由媒体适配器显式转换到 16kHz 的
+    int16/float PCM；它确定性下混、按官方 1s unit 组装，并拒绝隐式线性重采样、
+    非有限值与错位 interleaved frame。新的输入会丢弃未凑满的旧输入尾帧再推进
+    epoch，避免跨用户说话片段混合。LiveKit 48kHz → 16kHz 的高保真重采样仍须由
+    具体 SDK/设备适配器显式提供，未伪称已接入。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
