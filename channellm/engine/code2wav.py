@@ -26,6 +26,10 @@ class PcmQualityError(RuntimeError):
     """Token2wav 产物违反播放前的硬完整性门禁。"""
 
 
+_PLAYBACK_PEAK_CEILING = 0.98
+_NORMALIZED_PEAK = 0.97
+
+
 class Code2Wav:
     def __init__(
         self,
@@ -92,14 +96,25 @@ def _validated_waveform(wave: Any, sample_rate: int | None = None) -> np.ndarray
     """在 PCM 进入媒体层前执行无损的硬完整性门禁。
 
     流式块可以短于一段完整话语，也允许静音收尾，所以这里不对时长或 RMS
-    做判断。接近满幅、削波、直流偏置和突变则在任意块长度下都可能造成可听
-    伪影，必须在 publish 前拒绝；整段可懂度/自然度仍由离线质检和人工回放负责。
+    做判断。非削波的轻微满幅只代表播放增益过高，先按固定目标峰值做保形缩放；
+    削波、直流偏置和缩放后仍存在的突变则在任意块长度下都可能造成可听伪影，
+    必须在 publish 前拒绝。整段可懂度/自然度仍由离线质检和人工回放负责。
     """
     if sample_rate is not None and sample_rate != 24_000:
         raise PcmQualityError(f"Token2wav 应输出 24kHz,得到 {sample_rate}")
     samples = np.asarray(wave, dtype=np.float32).reshape(-1)
     quality = inspect_signal(samples, 24_000)
-    failures = quality.failures(min_duration_s=0.0, min_rms=0.0, max_peak=0.98)
+    # ``0.99`` 而非 ``1.0`` 的孤立峰值在真实 Token2wav 回放中反复出现，且
+    # 没有 clipped sample。把整块缩到 -0.26dB 的 0.97 保留形状、同时给设备链
+    # 路留出 headroom；不能对真正削波做同样处理，因为失真已经写入波形。
+    if _PLAYBACK_PEAK_CEILING < quality.peak < 0.999:
+        samples = samples * (_NORMALIZED_PEAK / quality.peak)
+        quality = inspect_signal(samples, 24_000)
+    failures = quality.failures(
+        min_duration_s=0.0,
+        min_rms=0.0,
+        max_peak=_PLAYBACK_PEAK_CEILING,
+    )
     if failures:
         raise PcmQualityError("Token2wav PCM 质量门禁拒绝: " + "; ".join(failures))
     return samples

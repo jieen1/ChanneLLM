@@ -60,7 +60,6 @@ def test_stream_chunk_rejects_nonfinite_tensor_before_playback() -> None:
     ("wave", "failure"),
     [
         (torch.tensor([0.0, 1.0]), "peak 1.00000"),
-        (torch.tensor([0.0, 0.99]), "peak 0.99000 > 0.98000"),
         (torch.tensor([0.0, 0.9]), "sample step 0.90000"),
         (torch.full((8,), 0.2), "dc offset 0.20000"),
     ],
@@ -72,3 +71,13 @@ def test_stream_chunk_rejects_audible_pcm_integrity_failures_before_playback(
 
     with pytest.raises(PcmQualityError, match=failure):
         code2wav.stream_chunk([1])
+
+
+def test_stream_chunk_normalizes_non_clipped_near_full_scale_pcm() -> None:
+    code2wav = _streaming_code2wav(
+        torch.tensor([0.5, 0.99, 0.5, -0.3, -0.8, -0.6, -0.3])
+    )
+
+    actual = code2wav.stream_chunk([1])
+
+    assert np.abs(actual).max() == pytest.approx(0.97)

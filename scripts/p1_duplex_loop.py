@@ -174,7 +174,7 @@ def main() -> int:
     from channellm.duplex.runtime import RealtimeRuntime
     from channellm.metrics.latency import format_waterfall, waterfall
     from channellm.pipeline.orchestrator import Orchestrator
-    from channellm.tracing import TraceRecorder, load_records
+    from channellm.tracing import Anchor, TraceRecorder, load_records
 
     # 默认连续 KV 保持 Torch SDPA 数值语义，同时避免 Talker decode 的逐层 cat。
     talker_stream = TalkerStream(talker)
@@ -327,19 +327,28 @@ def main() -> int:
         quality = inspect_signal(wav, 24_000)
         failures = quality.failures()
         review_warnings = quality.review_warnings()
+        rejection_reasons = [
+            str(record.extra.get("reason", "unspecified PCM quality failure"))
+            for record in run_records
+            if record.anchor == Anchor.PCM_QUALITY_REJECTED
+        ]
         print(
             f"[done] 已写入 {run_out} (rms={quality.rms:.4f}, "
             f"peak={quality.peak:.4f}, clip={quality.clipped_ratio:.6f}, "
             f"dc={quality.dc_offset:.5f}, max-step={quality.max_step:.5f})"
         )
         spoke = bool(session.res_ids)
-        ok = spoke and bool(played) and not failures and not review_warnings
-        integrity = "; ".join(failures) if failures else "signal-integrity gate passed"
-        review = "; ".join(review_warnings) if review_warnings else "no review warning"
-        print(
-            f"[verify] {'PASS' if ok else 'REVIEW'}: 开口={spoke}; "
-            f"{integrity}; {review}"
-        )
+        if rejection_reasons:
+            ok = False
+            print(f"[verify] REJECTED: {'; '.join(rejection_reasons)}")
+        else:
+            ok = spoke and bool(played) and not failures and not review_warnings
+            integrity = "; ".join(failures) if failures else "signal-integrity gate passed"
+            review = "; ".join(review_warnings) if review_warnings else "no review warning"
+            print(
+                f"[verify] {'PASS' if ok else 'REVIEW'}: 开口={spoke}; "
+                f"{integrity}; {review}"
+            )
         all_ok = all_ok and ok
 
     print(
