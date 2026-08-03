@@ -204,18 +204,36 @@ class Thinker(nn.Module):
         n_new: int,
         kv: KVBackend,
         eos_token_id: int | None = None,
-    ) -> list[int]:
-        """prefill + 逐 token decode,贪心。返回新产出的 token。"""
+        return_hidden_states: bool = False,
+    ) -> list[int] | tuple[list[int], list[torch.Tensor]]:
+        """prefill + 逐 token decode,贪心。返回新产出的 token。
+
+        return_hidden_states=True 时额外返回每个产出 token 对应位置的末层
+        隐层向量(Talker hidden_text_merge 条件化的输入)。
+        """
         device = self.embed_tokens.weight.device
         logits = self.forward(torch.tensor(prompt_ids, dtype=torch.long, device=device), kv)
         out: list[int] = []
+        hiddens: list[torch.Tensor] = []
         next_id = int(logits[-1].argmax())
         for _ in range(n_new):
-            logits = self.forward(torch.tensor([next_id], dtype=torch.long, device=device), kv)
+            if return_hidden_states:
+                logits, hs = self.forward(
+                    torch.tensor([next_id], dtype=torch.long, device=device),
+                    kv,
+                    output_hidden_states=True,
+                )
+                hiddens.append(hs[-1][-1].clone())
+            else:
+                logits = self.forward(
+                    torch.tensor([next_id], dtype=torch.long, device=device), kv
+                )
             out.append(next_id)
             if eos_token_id is not None and next_id == eos_token_id:
                 break
             next_id = int(logits[-1].argmax())
+        if return_hidden_states:
+            return out, hiddens
         return out
 
 

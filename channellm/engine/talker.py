@@ -311,6 +311,8 @@ def map_tts_key(key: str) -> str | None:
     rest = key[len("tts."):]
     if rest.startswith("projector_spk."):
         return None  # 参考音频路由 Code2Wav 处理,本模块不装载
+    if rest == "emb_code.0.weight":
+        return "emb_code.weight"  # num_vq=1,解包 ModuleList 索引
     if rest == "head_code.0.parametrizations.weight.original0":
         return "head_code.__weight_norm_g"
     if rest == "head_code.0.parametrizations.weight.original1":

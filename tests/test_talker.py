@@ -72,6 +72,7 @@ def test_map_tts_key() -> None:
         "layers.3.self_attn.q_proj.weight"
     )
     assert map_tts_key("tts.model.embed_tokens.weight") == "model_embed.weight"
+    assert map_tts_key("tts.emb_code.0.weight") == "emb_code.weight"
     assert map_tts_key("tts.head_code.0.parametrizations.weight.original0") == (
         "head_code.__weight_norm_g"
     )
