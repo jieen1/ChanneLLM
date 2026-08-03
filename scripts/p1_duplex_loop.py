@@ -200,7 +200,15 @@ def main() -> int:
             append=False,
         ) as recorder:
             runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
-            driver = DuplexPipelineDriver(runtime, session, talker_stream, code2wav)
+            driver = DuplexPipelineDriver(
+                runtime,
+                session,
+                talker_stream,
+                code2wav,
+                response_text=lambda: audio_front.tokenizer.decode(
+                    session.res_ids, skip_special_tokens=True
+                ),
+            )
             queued = QueuedDuplexRuntime(driver) if args.queued_runtime else None
             tag = (
                 queued.begin_turn("local-replay")

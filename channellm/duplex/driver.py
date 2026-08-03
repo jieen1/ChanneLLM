@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -40,6 +41,7 @@ class DuplexPipelineDriver:
         duplex_session: Any,
         talker_stream: Any,
         code2wav: Any,
+        response_text: Callable[[], str] | None = None,
         thinker_to_talker: ChunkChannel[PipelineChunk] | None = None,
         talker_to_code2wav: ChunkChannel[PipelineChunk] | None = None,
     ) -> None:
@@ -47,6 +49,7 @@ class DuplexPipelineDriver:
         self.duplex_session = duplex_session
         self.talker_stream = talker_stream
         self.code2wav = code2wav
+        self.response_text = response_text
         self.thinker_to_talker = thinker_to_talker or ChunkChannel("thinker->talker")
         self.talker_to_code2wav = talker_to_code2wav or ChunkChannel("talker->code2wav")
 
@@ -147,6 +150,8 @@ class DuplexPipelineDriver:
                     self.runtime.submit_stage_output(tag, StageId.CODE2WAV, wave)
             elif chunk.source is StageId.TALKER and chunk.final:
                 self.runtime.submit_stage_output(tag, StageId.CODE2WAV, final=True)
+                if self.response_text is not None:
+                    self.runtime.set_response_text(tag, self.response_text())
                 self.runtime.finish_turn(tag)
 
 

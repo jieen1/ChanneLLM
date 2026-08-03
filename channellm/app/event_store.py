@@ -183,6 +183,15 @@ class EventStore:
             **kwargs,
         )
 
+    def recovery_state(
+        self, budget_tokens: int, token_counter: Any | None = None
+    ) -> Any:
+        """重启时重建已确认上下文与未完成任务；不恢复未播音频。"""
+        from channellm.app.recovery import recover_session
+
+        kwargs = {} if token_counter is None else {"token_counter": token_counter}
+        return recover_session(self, budget_tokens=budget_tokens, **kwargs)
+
     def close(self) -> None:
         self._conn.close()
 

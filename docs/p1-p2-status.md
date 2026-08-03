@@ -73,6 +73,11 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     生命周期。打断发生在 handoff 前时，旧 PCM 会被同步清空且 pump 不会写出它。
     真实权重回放通过该路径产生 24kHz WAV（RMS 0.0623、peak 0.4304），未触发
     信号失败或人工复核；它是 writer 边界，不是物理 DAC 或远端客户端证据。
+11. **可恢复会话事实**:首次 writer handoff 才写 `AgentSpeechActuallyPlayed`；如果
+    首帧先于最终文本生成，最终文本以 append-only supersede 修订该事实。重启恢复只
+    读取当前 session epoch 的有效 `ContextSnapshot` 与未收到 `TaskResultReady` 的
+    任务，绝不恢复未播放 PCM 或 `AgentSpeechPlanned`。这完成本地 crash-recovery
+    的事实边界，不等价于恢复 GPU KV、设备缓冲或远端媒体会话。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 

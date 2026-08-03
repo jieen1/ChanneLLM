@@ -40,6 +40,7 @@ class _ActiveTurn:
     streaming_prefill_done: bool = False
     first_token_decoded: bool = False
     talker_chunk_ready: bool = False
+    response_text: str = ""
     cleaned: bool = False
 
 
@@ -68,6 +69,8 @@ class RealtimeRuntime:
         self._cancelled_request_ids: list[str] = []
         self._playout_traces: dict[EpochTag, str] = {}
         self._playout_requests: dict[EpochTag, str] = {}
+        self._playout_texts: dict[EpochTag, str] = {}
+        self._playout_played_event_seqs: dict[EpochTag, int] = {}
         self._started_playout_tags: set[EpochTag] = set()
         self._pending_playout: EpochTag | None = None
 
@@ -160,6 +163,29 @@ class RealtimeRuntime:
             self._anchor(Anchor.FIRST_TOKEN_DECODED, tag, active.trace_id, ts_ns=ts_ns)
         return True
 
+    def set_response_text(self, tag: EpochTag, text: str) -> bool:
+        """保存本回合最终文本，供真正播放后写入 L4 事实。
+
+        这不是 transcript 的权威写入：只有媒体 writer 报告首帧 handoff 后，文本
+        才会伴随 ``AgentSpeechActuallyPlayed`` 进入事件日志。
+        """
+        active = self._active
+        if active is None or active.tag != tag or not self._is_current(tag):
+            return False
+        active.response_text = text.strip()
+        if active.planned:
+            self._playout_texts[tag] = active.response_text
+            played_seq = self._playout_played_event_seqs.get(tag)
+            if played_seq is not None and self.event_store is not None:
+                self._playout_played_event_seqs[tag] = self.event_store.supersede(
+                    played_seq,
+                    EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
+                    payload={"text": active.response_text},
+                    turn_id=self._playout_requests.get(tag),
+                    speech_id=tag.speech_id,
+                )
+        return True
+
     def on_device_playout_start(self, tag: EpochTag) -> bool:
         """由媒体 writer 在设备/下行真正取走首块 PCM 时调用。
 
@@ -174,8 +200,9 @@ class RealtimeRuntime:
             self._started_playout_tags.add(tag)
             self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
             if self.event_store is not None:
-                self.event_store.append(
+                self._playout_played_event_seqs[tag] = self.event_store.append(
                     EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
+                    payload={"text": self._playout_texts.get(tag, "")},
                     turn_id=self._playout_requests.get(tag),
                     speech_id=tag.speech_id,
                 )
@@ -188,6 +215,8 @@ class RealtimeRuntime:
         self._pending_playout = None
         self._playout_traces.pop(tag, None)
         self._playout_requests.pop(tag, None)
+        self._playout_texts.pop(tag, None)
+        self._playout_played_event_seqs.pop(tag, None)
         self._started_playout_tags.discard(tag)
         self.state_machine.on_playout_finished(tag)
         return True
@@ -260,6 +289,7 @@ class RealtimeRuntime:
             active.planned = True
             self._playout_traces[active.tag] = active.trace_id
             self._playout_requests[active.tag] = active.request_id
+            self._playout_texts[active.tag] = active.response_text
             self._pending_playout = active.tag
             self.state_machine.on_speak_start(active.tag)
             self._event(EventKind.AGENT_SPEECH_PLANNED, active)
@@ -321,6 +351,8 @@ class RealtimeRuntime:
         self._anchor(Anchor.PLAYOUT_MUTED, active.tag, active.trace_id)
         self._playout_traces.pop(active.tag, None)
         self._playout_requests.pop(active.tag, None)
+        self._playout_texts.pop(active.tag, None)
+        self._playout_played_event_seqs.pop(active.tag, None)
         self._started_playout_tags.discard(active.tag)
         if self._pending_playout == active.tag:
             self._pending_playout = None
@@ -335,6 +367,8 @@ class RealtimeRuntime:
             self._anchor(Anchor.PLAYOUT_MUTED, tag, trace_id)
         self._playout_traces.pop(tag, None)
         self._playout_requests.pop(tag, None)
+        self._playout_texts.pop(tag, None)
+        self._playout_played_event_seqs.pop(tag, None)
         self._started_playout_tags.discard(tag)
         self._pending_playout = None
 

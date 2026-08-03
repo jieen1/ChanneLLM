@@ -115,6 +115,48 @@ def test_runtime_publishes_fresh_audio_and_records_trace_and_events(tmp_path):
     assert records[0].trace_id
 
 
+def test_runtime_persists_final_text_only_after_media_handoff(tmp_path):
+    event_path = tmp_path / "events.sqlite"
+    sink = BufferedPlaybackSink()
+    with EventStore(event_path) as store:
+        runtime = RealtimeRuntime(Orchestrator(), sink, event_store=store)
+        tag = runtime.begin_turn("speech-text")
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm")
+        assert runtime.set_response_text(tag, " 已播放的最终回复 ")
+        assert runtime.finish_turn(tag)
+        before_handoff = list(store.iterate())
+        assert [event.kind for event in before_handoff] == [
+            EventKind.AGENT_SPEECH_PLANNED.value
+        ]
+
+        assert runtime.on_device_playout_start(tag)
+        events = list(store.iterate())
+
+    assert events[-1].kind == EventKind.AGENT_SPEECH_ACTUALLY_PLAYED.value
+    assert events[-1].payload == {"text": "已播放的最终回复"}
+
+
+def test_runtime_supersedes_partial_playout_text_when_stream_finishes(tmp_path):
+    event_path = tmp_path / "events.sqlite"
+    with EventStore(event_path) as store:
+        runtime = RealtimeRuntime(Orchestrator(), BufferedPlaybackSink(), event_store=store)
+        tag = runtime.begin_turn("speech-streaming-text")
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm")
+        assert runtime.on_device_playout_start(tag)
+        assert runtime.set_response_text(tag, "最终完整回复")
+        events = list(store.iterate())
+
+    actual = [
+        event
+        for event in events
+        if event.kind == EventKind.AGENT_SPEECH_ACTUALLY_PLAYED.value
+    ]
+    assert len(actual) == 2
+    assert actual[0].payload == {"text": ""}
+    assert actual[1].payload == {"text": "最终完整回复"}
+    assert actual[1].supersedes == actual[0].seq
+
+
 def test_runtime_barge_in_cancels_without_cleanup_and_drops_stale_audio(tmp_path):
     trace_path = tmp_path / "runtime.jsonl"
     orchestrator = FakeOrchestrator()
