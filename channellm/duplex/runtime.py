@@ -80,6 +80,7 @@ class RealtimeRuntime:
         tag = self.epoch_guard.advance(speech_id)
         request_id = new_request_id()
         self.orchestrator.submit_initial(request_id, tag.turn_epoch, tag.speech_id)
+        self.state_machine.on_input_start(tag)
         self._active = _ActiveTurn(
             request_id=request_id,
             tag=tag,
@@ -127,6 +128,7 @@ class RealtimeRuntime:
             return False
         self._pending_playout = None
         self._playout_traces.pop(tag, None)
+        self.state_machine.on_playout_finished(tag)
         return True
 
     def submit_stage_output(
@@ -193,7 +195,7 @@ class RealtimeRuntime:
             active.planned = True
             self._playout_traces[active.tag] = active.trace_id
             self._pending_playout = active.tag
-            self.state_machine.on_speak_start()
+            self.state_machine.on_speak_start(active.tag)
             self._event(EventKind.AGENT_SPEECH_PLANNED, active)
             self._anchor(Anchor.CODE2WAV_FIRST_PCM, active.tag, active.trace_id)
         self.sink.publish(payload, active.tag)

@@ -138,7 +138,8 @@ def test_runtime_barge_in_cancels_without_cleanup_and_drops_stale_audio(tmp_path
     assert orchestrator.cancel_calls == [old_request_id]
     assert orchestrator.cleanup_calls == []
     assert emitted == []
-    assert runtime.state_machine.phase is TurnPhase.INTERRUPTED
+    assert runtime.state_machine.phase is TurnPhase.LISTENING
+    assert runtime.state_machine.input.active_tag == new_tag
     assert runtime.reap_cancelled() == 1
     assert orchestrator.cleanup_calls == [old_request_id]
 

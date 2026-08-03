@@ -1,3 +1,4 @@
+from channellm.duplex.epoch import EpochTag
 from channellm.duplex.session import SessionStateMachine, TurnPhase
 from channellm.models.minicpmo import FACTS, find_weights
 from channellm.pipeline.orchestrator import Orchestrator, new_request_id
@@ -31,14 +32,33 @@ def test_orchestrator_rejects_duplicate():
 def test_session_phases():
     session = SessionStateMachine()
     assert session.phase is TurnPhase.LISTENING
+    tag = EpochTag(1, "s1")
+    session.on_input_start(tag)
     session.on_eou()
     assert session.phase is TurnPhase.THINKING
-    session.on_speak_start()
+    session.on_speak_start(tag)
     assert session.phase is TurnPhase.SPEAKING
     session.on_barge_in()
     assert session.phase is TurnPhase.INTERRUPTED
     session.on_reply_done()
     assert session.phase is TurnPhase.LISTENING
+
+
+def test_session_domains_keep_notifications_and_tasks_across_barge_in():
+    session = SessionStateMachine()
+    old_tag = EpochTag(1, "old")
+    session.on_input_start(old_tag)
+    session.on_speak_start(old_tag)
+    session.on_notification_enqueued("task-ready")
+    session.on_task_enqueued("task-1")
+
+    session.on_barge_in()
+    session.on_input_start(EpochTag(2, "new"))
+
+    assert session.reply.generation_tag is None
+    assert session.reply.playout_tag is None
+    assert session.notification.pending_keys == {"task-ready"}
+    assert session.task.pending_task_ids == {"task-1"}
 
 
 def test_model_facts_match_design():
