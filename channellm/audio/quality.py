@@ -53,6 +53,19 @@ class SignalQuality:
             failures.append(f"sample step {self.max_step:.5f} > {max_step:.5f}")
         return tuple(failures)
 
+    def review_warnings(
+        self,
+        *,
+        recommended_max_peak: float = 0.98,
+    ) -> tuple[str, ...]:
+        """返回不会证明音质合格、但需要保留样本人工复核的风险。"""
+        warnings: list[str] = []
+        if self.peak >= recommended_max_peak:
+            warnings.append(
+                f"peak {self.peak:.5f} >= review threshold {recommended_max_peak:.5f}"
+            )
+        return tuple(warnings)
+
 
 def inspect_signal(wave: np.ndarray, sample_rate: int) -> SignalQuality:
     """计算可复现的基础信号指标，不修改输入。"""

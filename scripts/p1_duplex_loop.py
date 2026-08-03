@@ -264,15 +264,20 @@ def main() -> int:
         sf.write(str(run_out), wav, 24000)
         quality = inspect_signal(wav, 24_000)
         failures = quality.failures()
+        review_warnings = quality.review_warnings()
         print(
             f"[done] 已写入 {run_out} (rms={quality.rms:.4f}, "
             f"peak={quality.peak:.4f}, clip={quality.clipped_ratio:.6f}, "
             f"dc={quality.dc_offset:.5f}, max-step={quality.max_step:.5f})"
         )
         spoke = bool(session.res_ids)
-        ok = spoke and bool(played) and not failures
-        detail = "; ".join(failures) if failures else "signal-integrity gate passed"
-        print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke}; {detail}")
+        ok = spoke and bool(played) and not failures and not review_warnings
+        integrity = "; ".join(failures) if failures else "signal-integrity gate passed"
+        review = "; ".join(review_warnings) if review_warnings else "no review warning"
+        print(
+            f"[verify] {'PASS' if ok else 'REVIEW'}: 开口={spoke}; "
+            f"{integrity}; {review}"
+        )
         all_ok = all_ok and ok
 
     print(

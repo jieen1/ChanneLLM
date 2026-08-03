@@ -36,3 +36,13 @@ def test_signal_quality_rejects_dc_bias_and_obvious_sample_pop() -> None:
 
     assert "dc offset 0.20000 exceeds 0.10000" in biased.failures()
     assert "sample step 0.90000 > 0.80000" in popped.failures()
+
+
+def test_signal_quality_marks_near_full_scale_for_human_review() -> None:
+    waveform = 0.99 * np.sin(2 * np.pi * 440 * np.arange(24_000) / 24_000)
+    quality = inspect_signal(waveform.astype(np.float32), 24_000)
+
+    assert quality.failures() == ()
+    assert quality.review_warnings() == (
+        "peak 0.99000 >= review threshold 0.98000",
+    )
