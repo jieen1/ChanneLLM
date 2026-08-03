@@ -32,9 +32,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
-   → DEVICE_PLAYOUT_START` 完整 trace。最新一次 GPU 运行输出 24kHz / 2.000s，
-   RMS 0.068862、峰值 0.445496、零削波、直流偏置 -0.000018、最大相邻采样步长
-   0.120422；门禁会拒绝空音、非有限值、削波、明显直流偏置和采样突变。它只证明
+   → DEVICE_PLAYOUT_START` 完整 trace。2026-08-04 最新 GPU 回放输出 24kHz，
+   RMS 0.0868、峰值 0.5622、零削波、直流偏置 0.00000、最大相邻采样步长
+   0.14326；门禁会拒绝空音、非有限值、削波、明显直流偏置和采样突变。它只证明
    信号完整性，不证明可懂度或主观自然度，必须保留回放样本供人工评审。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
@@ -51,9 +51,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 
 | 段 | 耗时 | 1s 预算 |
 |---|---|---|
-| EOU → speak decision | 2591.3ms | ⚠️ 单样本，含仍待优化的 Thinker 决策 |
-| speak decision → 首 PCM | 262.1ms | ✅ 单样本本地 GPU 路径 |
-| EOU → 首 PCM | 2853.3ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
+| EOU → speak decision | 1908.3ms | ⚠️ 单样本，含仍待优化的 Thinker 决策 |
+| speak decision → 首 PCM | 291.7ms | ✅ 单样本本地 GPU 路径 |
+| EOU → 首 PCM | 2199.9ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
 
 这些是 trace 实测，不可与其它轮次拼接，也不能代替 cold/warm、p50/p95/p99 报告。
 
@@ -66,7 +66,14 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
   1. `sparkinfer_attn` 静态缓冲 + 按 (mode,形状,层) 缓存 binding,
      bind 成本在热路径摊薄为零(run 0.63ms/层);
   2. `paged_kv.slot_for` 每步一次算槽,36 层 append 复用索引;
-  3. SparkinferPagedKV 在 begin_step 提升 slot。
+  3. `SparkinferPagedKV` 在 `begin_step` 提升 slot，并在一个 token 的
+     全部层间复用同一份页表、cache length 与 cumulative-q metadata；commit 后
+     无条件释放，跨页时重新生成。
+- **受控 graph 原型验证**:必须在真实 prefill 前 capture，随后释放 warmup/capture
+  的 dummy KV 页并同步静态页表；否则第二个 token 起会与 eager 分歧。在该生命周期
+  下，真实权重的连续 8 个贪心 token 与 eager 完全相同；隔离基准为 eager
+  37.29ms/token（26.82 tok/s）、graph 19.39ms/token（51.58 tok/s）。该原型尚未
+  进入受控生产热路径，不能据此声称端到端提速或扩大质量承诺。
 - **测量说明**:全模型对比数字受共享 GPU 上不可见并发负载污染
   (nvidia-smi 可见 60%+ 利用率但无进程归属),最终全模型数字待
   GPU 空闲窗口复测;微基准数字为 GPU 空闲时测得,可信。
