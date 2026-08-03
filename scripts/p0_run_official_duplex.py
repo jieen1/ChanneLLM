@@ -47,7 +47,9 @@ def load_model(model_dir: Path, device: str, attn_implementation: str):
     from channellm.models.minicpmo_compat import (
         patch_config,
         patch_dynamic_cache,
+        patch_encoder_decoder_cache,
         patch_model_class,
+        patch_whisper_attention,
     )
 
     # 权重目录的 modeling 代码是带相对导入的动态模块包,只能经
@@ -56,6 +58,8 @@ def load_model(model_dir: Path, device: str, attn_implementation: str):
         AutoConfig.from_pretrained(str(model_dir), trust_remote_code=True)
     )
     patch_dynamic_cache()
+    patch_whisper_attention()
+    patch_encoder_decoder_cache()
     model_cls = get_class_from_dynamic_module(config.auto_map["AutoModel"], str(model_dir))
     patch_model_class(model_cls)
     model = AutoModel.from_pretrained(

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
+
 # 默认值取自官方 streaming_generate 签名(modeling_minicpmo.py:3151)
 TTS_CONFIG_DEFAULTS: dict[str, Any] = {
     "top_p": 0.8,
@@ -134,3 +136,93 @@ def patch_dynamic_cache() -> None:
             return self.get_seq_length(layer_idx)
 
         DynamicCache.get_usable_length = get_usable_length
+
+
+def patch_whisper_attention() -> None:
+    """transformers 5 的 WhisperAttention.forward 返回 2 元组(不再带 cache);
+    官方 audio encoder 按 4.x 解包 3 元组。5.x 的 cache 是原地更新,
+    把传入的 past_key_value 补回第三位即可,幂等。"""
+    try:
+        from transformers.models.whisper import modeling_whisper
+    except ImportError:
+        return
+
+    classes: list[type] = []
+    mapping = getattr(modeling_whisper, "WHISPER_ATTENTION_CLASSES", None)
+    if isinstance(mapping, dict):
+        classes.extend(mapping.values())
+    for name in ("WhisperAttention", "WhisperFlashAttention2", "WhisperSdpaAttention"):
+        cls = getattr(modeling_whisper, name, None)
+        if cls is not None:
+            classes.append(cls)
+
+    seen: set[type] = set()
+    for cls in classes:
+        if cls in seen or getattr(cls, "_channellm_compat", False):
+            continue
+        seen.add(cls)
+        original_forward = cls.forward
+
+        def make_wrapped(orig):
+            def wrapped(self, *args, **kwargs):
+                result = orig(self, *args, **kwargs)
+                if isinstance(result, tuple) and len(result) == 2:
+                    return (result[0], result[1], kwargs.get("past_key_value"))
+                return result
+
+            return wrapped
+
+        cls.forward = make_wrapped(original_forward)
+        cls._channellm_compat = True
+
+
+class _LegacyEncoderDecoderLayerView:
+    """legacy 4.x 布局按层索引:cache[layer_idx] ->
+    (self_k, self_v, cross_k, cross_v)。"""
+
+    def __init__(self, self_attn: Any, cross_attn: Any, layer_idx: int) -> None:
+        self._self_attn = self_attn
+        self._cross_attn = cross_attn
+        self._layer_idx = layer_idx
+
+    def _layer_tensor(self, cache: Any, which: str):
+        layers = cache.layers
+        if self._layer_idx >= len(layers):
+            return torch.empty((0, 0, 0, 0))  # 空缓存 = 无历史,长度读 0
+        tensor = getattr(layers[self._layer_idx], which, None)
+        return tensor if tensor is not None else torch.empty((0, 0, 0, 0))
+
+    def __getitem__(self, idx: int):
+        if idx == 0:
+            return self._layer_tensor(self._self_attn, "keys")
+        if idx == 1:
+            return self._layer_tensor(self._self_attn, "values")
+        if idx == 2:
+            return self._layer_tensor(self._cross_attn, "keys")
+        if idx == 3:
+            return self._layer_tensor(self._cross_attn, "values")
+        raise IndexError(idx)
+
+
+def patch_encoder_decoder_cache() -> None:
+    """官方 get_audio_embedding_streaming 用 legacy 下标读缓存长度
+    (audio_past_key_values[0][0].shape[2]);transformers 5 的
+    EncoderDecoderCache 不可下标。补只读视图,4.x 已可下标则跳过,幂等。"""
+    from transformers.cache_utils import EncoderDecoderCache
+
+    probe = EncoderDecoderCache.__new__(EncoderDecoderCache)
+    try:
+        _ = probe[0]  # noqa: F841 - 探测下标能力
+        return
+    except (TypeError, IndexError, AttributeError):
+        pass
+    if getattr(EncoderDecoderCache, "_channellm_compat", False):
+        return
+
+    def getitem(self, idx: int):
+        return _LegacyEncoderDecoderLayerView(
+            self.self_attention_cache, self.cross_attention_cache, idx
+        )
+
+    EncoderDecoderCache.__getitem__ = getitem
+    EncoderDecoderCache._channellm_compat = True
