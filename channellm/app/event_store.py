@@ -69,8 +69,12 @@ class EventStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.session_epoch = session_epoch
-        self._write_lock = threading.Lock()
-        self._conn = sqlite3.connect(str(self.path), isolation_level=None)
+        # L3 GPU worker 与媒体 writer 都会追加事实；连接允许跨线程，但所有
+        # connection 操作仍由此锁串行，保持 SQLite WAL 的单写者不变量。
+        self._write_lock = threading.RLock()
+        self._conn = sqlite3.connect(
+            str(self.path), isolation_level=None, check_same_thread=False
+        )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -139,7 +143,9 @@ class EventStore:
             query += " AND turn_id = ?"
             args.append(turn_id)
         query += " ORDER BY seq"
-        for row in self._conn.execute(query, args):
+        with self._write_lock:
+            rows = list(self._conn.execute(query, args))
+        for row in rows:
             yield Event(
                 seq=row[0],
                 session_epoch=row[1],
@@ -193,7 +199,8 @@ class EventStore:
         return recover_session(self, budget_tokens=budget_tokens, **kwargs)
 
     def close(self) -> None:
-        self._conn.close()
+        with self._write_lock:
+            self._conn.close()
 
     def __enter__(self) -> EventStore:
         return self

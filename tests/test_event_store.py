@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 from channellm.app.event_store import EventKind, EventStore
 
@@ -39,3 +40,20 @@ def test_supersede_revision(tmp_path):
         superseded = list(store.iterate(kind=EventKind.SUPERSEDED))
         assert len(superseded) == 1
         assert superseded[0].payload["by"] == new
+
+
+def test_event_store_serializes_worker_thread_appends(tmp_path):
+    with EventStore(tmp_path / "events.sqlite", session_epoch=2) as store:
+        threads = [
+            threading.Thread(
+                target=lambda: store.append(EventKind.USER_BACKCHANNEL_OBSERVED),
+            )
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        events = list(store.iterate())
+
+    assert [event.seq for event in events] == list(range(1, 9))
