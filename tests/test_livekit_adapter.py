@@ -107,6 +107,21 @@ class _Rtc:
     Room = _Room
 
 
+class _FailingStream(_Stream):
+    async def __anext__(self):
+        raise OSError("remote track disconnected")
+
+
+class _FailingAudioStream:
+    @staticmethod
+    def from_track(**kwargs):
+        return _FailingStream(kwargs)
+
+
+class _FailingRtc(_Rtc):
+    AudioStream = _FailingAudioStream
+
+
 class _Ingress:
     def __init__(self) -> None:
         self.begun: list[str] = []
@@ -183,6 +198,21 @@ def test_forward_segment_flushes_only_normally_terminated_speech() -> None:
     samples, sample_rate, channels = ingress.frames[0]
     np.testing.assert_array_equal(samples, [1, 2])
     assert (sample_rate, channels) == (INPUT_SAMPLE_RATE, 1)
+
+
+def test_forward_segment_does_not_emit_eou_after_stream_failure() -> None:
+    ingress = _Ingress()
+
+    with pytest.raises(OSError, match="remote track disconnected"):
+        asyncio.run(
+            LiveKitAudioInput(_FailingRtc).forward_segment(
+                object(), ingress, speech_id="failed-speech"
+            )
+        )
+
+    assert ingress.begun == ["failed-speech"]
+    assert ingress.frames == []
+    assert ingress.ended == 0
 
 
 def test_received_pcm_rejects_malformed_geometry() -> None:
