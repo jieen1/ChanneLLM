@@ -32,9 +32,10 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
-   → DEVICE_PLAYOUT_START` 完整 trace。2026-08-04 最新 GPU 回放输出 24kHz，
-   RMS 0.0837、峰值 0.4570、零削波、直流偏置 -0.00008、最大相邻采样步长
-   0.13612；门禁会拒绝空音、非有限值、削波、明显直流偏置和采样突变。它只证明
+   → DEVICE_PLAYOUT_START` 完整 trace。2026-08-04 两次同代码 GPU 回放输出
+   24kHz，RMS 0.0654–0.0871、峰值 0.5270–0.6072、零削波、直流偏置均为
+   0.00000、最大相邻采样步长 0.10337–0.15723；门禁会拒绝空音、非有限值、削波、
+   明显直流偏置和采样突变。它只证明
    信号完整性，不证明可懂度或主观自然度，必须保留回放样本供人工评审。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
@@ -47,16 +48,17 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    决策。当前项目 venv 缺少 SoulX 官方推理依赖，因而仅验证注入契约，未伪称模型
    已共驻运行。
 
-## 实时预算(单个本地 fixture 回放，非 SLO)
+## 实时预算(两个本地 fixture 回放，非 SLO)
 
-| 段 | 耗时 | 1s 预算 |
+| 段 | n=2 实测范围 | 1s 预算 |
 |---|---|---|
-| EOU → speak decision | 498.1ms | ⚠️ 单样本；现为 Thinker 首次决定开口的真实锚点 |
-| speak decision → 首 PCM | 1634.2ms | ⚠️ 单样本；包含 Talker 首块与首段 Code2Wav 路径 |
-| EOU → 首 PCM | 2132.3ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
+| EOU → speak decision | 463.9–545.0ms | ⚠️ 真实 Thinker 首次决定开口锚点 |
+| speak decision → 首 PCM | 530.4–1521.5ms | ⚠️ 包含 Talker 首块与首段 Code2Wav 路径 |
+| EOU → 首 PCM | 1075.4–1985.4ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
 
 `speak decision` 与 `talker chunk ready` 已分离记录；过去把后者误作前者的单样本
-不再用于归因。以上仍只是 n=1 trace，不可与其它轮次拼接，也不能代替 cold/warm、
+不再用于归因。以上仍只是 n=2 trace，且共享 GPU 调度会造成明显波动；不可与其它
+轮次拼接，也不能代替 cold/warm、
 p50/p95/p99 报告。
 
 ## decode 性能优化(本阶段成果)
@@ -71,6 +73,13 @@ p50/p95/p99 报告。
   3. `SparkinferPagedKV` 在 `begin_step` 提升 slot，并在一个 token 的
      全部层间复用同一份页表、cache length 与 cumulative-q metadata；commit 后
      无条件释放，跨页时重新生成。
+- **Talker 首块**:
+  1. 首个 codec phrase 按官方 S3 流式口径插入 3 个 `4218` 静音前瞻码，令
+     25 个新帧立刻形成首个 28 帧 Code2Wav 窗口；空回复不会合成伪静音；
+  2. Talker 默认改用连续预分配 KV + Torch SDPA，消除每层、每 token 的
+     `torch.cat`。真实权重连续 12 个贪心 codec token 与参考 `TorchListKV`
+     完全一致；隔离 decode 微基准为 28.24→9.33ms/token。sparkinfer paged
+     内核不支持 Talker 的 12 heads / head_dim 64，故未强行接入。
 - **受控 graph 原型验证**:必须在真实 prefill 前 capture，随后释放 warmup/capture
   的 dummy KV 页并同步静态页表；否则第二个 token 起会与 eager 分歧。在该生命周期
   下，真实权重的连续 8 个贪心 token 与 eager 完全相同；隔离基准为 eager

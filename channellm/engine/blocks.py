@@ -112,6 +112,91 @@ class TorchListKV:
         self._n_new = 0
 
 
+class TorchStaticKV:
+    """连续预分配 KV 后端：保留 Torch SDPA 语义，避免 decode 时逐层 ``cat``。
+
+    Talker 的 12 heads / head_dim 64 目前不满足 sparkinfer paged kernel 的
+    可用 trait，因此不能把 Thinker 的 paged 后端硬套进来。此后端为单会话
+    单序列预留固定容量，每步只做 slice + 原地写入；满容量时显式失败，而非
+    静默扩容或截断历史。
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        max_seq_len: int,
+        num_kv_heads: int,
+        head_dim: int,
+        *,
+        device: torch.device | str = "cpu",
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        if min(num_layers, max_seq_len, num_kv_heads, head_dim) <= 0:
+            raise ValueError("static KV dimensions must be positive")
+        shape = (num_layers, max_seq_len, num_kv_heads, head_dim)
+        self.k_pages = torch.empty(shape, device=device, dtype=dtype)
+        self.v_pages = torch.empty_like(self.k_pages)
+        self.max_seq_len = max_seq_len
+        self.prefix_len = 0
+        self.length = 0
+        self._n_new = 0
+
+    def begin_step(self, n_new: int) -> None:
+        if n_new < 0:
+            raise ValueError("n_new cannot be negative")
+        if self.length + n_new > self.max_seq_len:
+            raise MemoryError(
+                f"static KV capacity exceeded: {self.length + n_new} > {self.max_seq_len}"
+            )
+        self.prefix_len = self.length
+        self._n_new = n_new
+
+    def append_layer(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        if k.shape != v.shape or k.ndim != 3:
+            raise ValueError("k/v must have matching [tokens, heads, dim] shape")
+        if k.shape[0] != self._n_new:
+            raise ValueError("k/v token count must match begin_step")
+        if k.shape[1:] != self.k_pages.shape[2:]:
+            raise ValueError("k/v head shape does not match static KV")
+        start = self.prefix_len
+        end = start + self._n_new
+        self.k_pages[layer_idx, start:end].copy_(k)
+        self.v_pages[layer_idx, start:end].copy_(v)
+
+    def attend(self, layer_idx: int, q: torch.Tensor) -> torch.Tensor:
+        cache_len = self.prefix_len + self._n_new
+        q_t = q.transpose(0, 1).unsqueeze(0)
+        k_t = self.k_pages[layer_idx, :cache_len].transpose(0, 1).unsqueeze(0)
+        v_t = self.v_pages[layer_idx, :cache_len].transpose(0, 1).unsqueeze(0)
+        if self._n_new == cache_len:
+            out = F.scaled_dot_product_attention(
+                q_t, k_t, v_t, is_causal=True, enable_gqa=True
+            )
+        elif self._n_new == 1:
+            # 单 token decode 位于当前 cache 的最后，所有 cached KV 都可见。
+            out = F.scaled_dot_product_attention(q_t, k_t, v_t, enable_gqa=True)
+        else:
+            q_idx = torch.arange(self._n_new, device=q.device).view(-1, 1)
+            k_idx = torch.arange(cache_len, device=q.device).view(1, -1)
+            mask = (k_idx > q_idx + cache_len - self._n_new).view(
+                1, 1, self._n_new, cache_len
+            )
+            out = F.scaled_dot_product_attention(
+                q_t, k_t, v_t, attn_mask=~mask, enable_gqa=True
+            )
+        return out.squeeze(0).transpose(0, 1)
+
+    def commit(self) -> None:
+        self.length += self._n_new
+        self._n_new = 0
+
+    def reset(self) -> None:
+        """逻辑复位；无需清零，因为 length 是唯一可见边界。"""
+        self.prefix_len = 0
+        self.length = 0
+        self._n_new = 0
+
+
 class SparkinferPagedKV:
     """生产后端:PagedKVPool + sparkinfer paged attention,单序列。
 

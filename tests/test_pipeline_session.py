@@ -99,14 +99,14 @@ def test_orchestrator_incrementally_routes_and_flushes_codec_tail():
         )
     ]
 
-    assert orch.submit_update("r1", StageId.TALKER, [1, 2]) == []
-    codec = orch.submit_update("r1", StageId.TALKER, [3])
+    assert orch.submit_update("r1", StageId.TALKER, [1]) == []
+    codec = orch.submit_update("r1", StageId.TALKER, [2])
     assert codec[0].stage is StageId.CODE2WAV
     assert codec[0].source is StageId.TALKER
-    assert codec[0].payload == (1, 2, 3)
+    assert codec[0].payload == (4218, 1, 2)
 
-    tail = orch.submit_update("r1", StageId.TALKER, [4], final=True)
-    assert [chunk.payload for chunk in tail] == [(3, 4), None]
+    tail = orch.submit_update("r1", StageId.TALKER, [3], final=True)
+    assert [chunk.payload for chunk in tail] == [(2, 3), None]
     assert tail[-1].final
 
     pcm = orch.submit_update("r1", StageId.CODE2WAV, b"pcm")
@@ -134,7 +134,7 @@ def test_orchestrator_prewarm_once_and_cancel_drops_pending_codec():
 
     state = orch.submit_initial("r1", turn_epoch=1)
     orch.submit_update("r1", StageId.TALKER, [1, 2])
-    assert state.codec_buffer == [1, 2]
+    assert state.codec_buffer == [4218, 4218, 4218, 1, 2]
     orch.cancel("r1")
     assert state.codec_buffer == []
     assert orch.submit_update("r1", StageId.TALKER, [3]) == []
@@ -148,8 +148,18 @@ def test_orchestrator_flushes_terminal_once_and_ignores_post_final_updates():
 
     # 正常块消费 3 帧后，最后 1 帧作为上下文保留给尾包；不能提前丢掉，
     # 否则 Code2Wav 在收尾处会断音。
-    assert [chunk.payload for chunk in emitted] == [(1, 2, 3, 4), (4,), None]
+    assert [chunk.payload for chunk in emitted] == [(4218, 1, 2, 3), (3, 4), None]
     assert emitted[-1].final
     assert StageId.TALKER in state.finished_stages
     assert orch.submit_update("r1", StageId.TALKER, [5]) == []
     assert orch.submit_update("r1", StageId.TALKER, final=True) == []
+
+
+def test_orchestrator_does_not_synthesize_silence_when_talker_emits_no_codec() -> None:
+    orch = Orchestrator()
+    state = orch.submit_initial("r1", turn_epoch=1)
+
+    emitted = orch.submit_update("r1", StageId.TALKER, final=True)
+
+    assert [chunk.payload for chunk in emitted] == [None]
+    assert not state.codec_prefix_seeded

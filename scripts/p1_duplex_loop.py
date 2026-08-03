@@ -133,13 +133,13 @@ def main() -> int:
     from channellm.duplex.driver import DuplexPipelineDriver
     from channellm.duplex.playback import BufferedPlaybackSink
     from channellm.duplex.runtime import RealtimeRuntime
-    from channellm.engine.blocks import TorchListKV
     from channellm.metrics.latency import format_waterfall, waterfall
     from channellm.pipeline.orchestrator import Orchestrator
     from channellm.tracing import TraceRecorder, load_records
 
     sink = BufferedPlaybackSink()
-    talker_stream = TalkerStream(talker, TorchListKV)
+    # 默认连续 KV 保持 Torch SDPA 数值语义，同时避免 Talker decode 的逐层 cat。
+    talker_stream = TalkerStream(talker)
     args.trace.parent.mkdir(parents=True, exist_ok=True)
     proc = audio_front.model.processor
     pos, idx = 0, 0

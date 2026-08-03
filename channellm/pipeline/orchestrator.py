@@ -27,6 +27,7 @@ from typing import Any
 from channellm.pipeline.stages import (
     CODEC_CHUNK_FRAMES,
     CODEC_LEFT_CONTEXT_FRAMES,
+    CODEC_STREAM_SILENCE_TOKEN,
     PIPELINE_ORDER,
     PipelineChunk,
     StageId,
@@ -46,14 +47,18 @@ class Orchestrator:
         self,
         codec_chunk_frames: int = CODEC_CHUNK_FRAMES,
         codec_left_context_frames: int = CODEC_LEFT_CONTEXT_FRAMES,
+        codec_silence_token: int = CODEC_STREAM_SILENCE_TOKEN,
     ) -> None:
         if codec_chunk_frames <= 0:
             raise ValueError("codec_chunk_frames must be positive")
         if codec_left_context_frames < 0:
             raise ValueError("codec_left_context_frames must be non-negative")
+        if not isinstance(codec_silence_token, int):
+            raise TypeError("codec_silence_token must be an int")
         self._requests: dict[str, StageRequestState] = {}
         self.codec_chunk_frames = codec_chunk_frames
         self.codec_left_context_frames = codec_left_context_frames
+        self.codec_silence_token = codec_silence_token
         self._prewarmed: set[StageId] = set()
 
     def submit_initial(
@@ -127,7 +132,10 @@ class Orchestrator:
         self, state: StageRequestState, chunk: Any, final: bool
     ) -> list[PipelineChunk]:
         if chunk is not None:
-            state.codec_buffer.extend(_as_frames(chunk))
+            frames = _as_frames(chunk)
+            if frames:
+                self._seed_codec_prefix(state)
+                state.codec_buffer.extend(frames)
 
         emitted: list[PipelineChunk] = []
         required = self.codec_chunk_frames + self.codec_left_context_frames
@@ -160,6 +168,19 @@ class Orchestrator:
                 )
             )
         return emitted
+
+    def _seed_codec_prefix(self, state: StageRequestState) -> None:
+        """只在首个真实 codec delta 前插入官方 S3 静音前瞻码。
+
+        首块须为 ``[4218] * 3 + 25 个模型帧``，这样 Code2Wav 不必等待第二个
+        Talker phrase。若一个 turn 从未产生 codec，绝不因该前缀合成虚假静音。
+        """
+        if state.codec_prefix_seeded:
+            return
+        state.codec_prefix_seeded = True
+        state.codec_buffer.extend(
+            [self.codec_silence_token] * self.codec_left_context_frames
+        )
 
     def _route_code2wav(
         self, state: StageRequestState, chunk: Any, final: bool

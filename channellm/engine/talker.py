@@ -22,7 +22,14 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from channellm.engine.blocks import MLP, KVBackend, RMSNorm, RotaryEmbedding, rotate_half
+from channellm.engine.blocks import (
+    MLP,
+    KVBackend,
+    RMSNorm,
+    RotaryEmbedding,
+    TorchStaticKV,
+    rotate_half,
+)
 
 
 @dataclasses.dataclass
@@ -329,15 +336,19 @@ class TalkerStream:
     ``reset`` 即可同步丢弃旧回合状态，而不需要等待 GPU 旧请求完成。
     """
 
-    def __init__(self, talker: Talker, kv_factory) -> None:
+    def __init__(self, talker: Talker, kv_factory=None) -> None:
         self.talker = talker
-        self._kv_factory = kv_factory
+        self._kv_factory = kv_factory or _static_kv_factory(talker)
         self._kv: KVBackend
         self._generator: torch.Generator
         self._started = False
         self.reset()
 
     def reset(self) -> None:
+        previous = getattr(self, "_kv", None)
+        reset = getattr(previous, "reset", None)
+        if callable(reset):
+            reset()
         self._kv = self._kv_factory()
         self._generator = torch.Generator(device=self.talker.emb_text.weight.device)
         self._generator.manual_seed(self.talker.config.seed)
@@ -395,6 +406,27 @@ class TalkerStream:
         if end_of_turn:
             self.reset()
         return generated
+
+
+def _static_kv_factory(talker: Talker):
+    """为单个 Talker stream 持有一个可逻辑复位的连续 KV 缓冲。"""
+    cfg = talker.config
+    kv: TorchStaticKV | None = None
+
+    def acquire() -> TorchStaticKV:
+        nonlocal kv
+        if kv is None:
+            kv = TorchStaticKV(
+                cfg.num_hidden_layers,
+                cfg.max_position_embeddings,
+                cfg.num_kv_heads,
+                cfg.head_dim,
+                device=talker.emb_text.weight.device,
+                dtype=talker.emb_text.weight.dtype,
+            )
+        return kv
+
+    return acquire
 
 
 # ---------------------------------------------------------------------------

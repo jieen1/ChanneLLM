@@ -249,11 +249,10 @@ def test_runtime_routes_three_stages_and_records_a_single_first_pcm_anchor(tmp_p
         assert len(talker_input) == 1
         assert talker_input[0].stage is StageId.TALKER
 
-        assert runtime.submit_stage_output(tag, StageId.TALKER, [1, 2]) == []
-        code2wav_input = runtime.submit_stage_output(tag, StageId.TALKER, [3])
+        code2wav_input = runtime.submit_stage_output(tag, StageId.TALKER, [1, 2])
         assert len(code2wav_input) == 1
         assert code2wav_input[0].stage is StageId.CODE2WAV
-        assert code2wav_input[0].payload == (1, 2, 3)
+        assert code2wav_input[0].payload == (4218, 1, 2)
         assert sink.published == []
 
         runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm-1")

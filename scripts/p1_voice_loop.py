@@ -74,7 +74,7 @@ def main() -> int:
     import soundfile as sf
     from transformers import AutoTokenizer
 
-    from channellm.engine.blocks import TorchListKV
+    from channellm.engine.blocks import TorchStaticKV
     from channellm.engine.code2wav import Code2Wav
     from channellm.engine.talker import load_talker_weights
     from channellm.engine.thinker import (
@@ -166,7 +166,14 @@ def main() -> int:
     # ---- Talker:codec token ----
     talker_ids = torch.tensor(text_tokens, dtype=torch.long, device=device)
     talker_hidden = torch.stack(text_hiddens).to(dtype)
-    talker_kv = TorchListKV()
+    talker_kv = TorchStaticKV(
+        talker.config.num_hidden_layers,
+        talker.config.max_position_embeddings,
+        talker.config.num_kv_heads,
+        talker.config.head_dim,
+        device=device,
+        dtype=dtype,
+    )
     torch.cuda.synchronize()
     t0 = time.time()
     codec_tokens = talker.generate_codec_tokens(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from channellm.engine.blocks import TorchListKV
+from channellm.engine.blocks import TorchListKV, TorchStaticKV
 from channellm.engine.talker import Talker, TalkerConfig, TalkerStream, map_tts_key
 
 
@@ -66,6 +66,31 @@ def test_generate_is_seeded_deterministic() -> None:
     assert a == b  # seed 42 固定,两次生成一致
 
 
+def test_static_kv_matches_list_kv_for_prefill_and_decode() -> None:
+    torch.manual_seed(23)
+    config = tiny_config()
+    talker = Talker(config)
+    embeds = torch.randn(3, config.hidden_size)
+
+    list_kv = TorchListKV()
+    static_kv = TorchStaticKV(
+        config.num_hidden_layers,
+        max_seq_len=16,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+    )
+    torch.testing.assert_close(
+        talker.forward_embeds(embeds, list_kv),
+        talker.forward_embeds(embeds, static_kv),
+    )
+    step = torch.randn(1, config.hidden_size)
+    torch.testing.assert_close(
+        talker.forward_embeds(step, list_kv),
+        talker.forward_embeds(step, static_kv),
+    )
+    assert static_kv.length == list_kv.length == 4
+
+
 def test_stream_keeps_kv_between_units_and_resets_after_eou() -> None:
     torch.manual_seed(13)
     talker = Talker(tiny_config())
@@ -82,6 +107,17 @@ def test_stream_keeps_kv_between_units_and_resets_after_eou() -> None:
     stream.push(ids, hidden, end_of_turn=True)
     assert stream._kv.length == 0
     assert not stream._started
+
+
+def test_stream_defaults_to_reusable_static_kv() -> None:
+    stream = TalkerStream(Talker(tiny_config()))
+    initial = stream._kv
+
+    stream.reset()
+
+    assert isinstance(stream._kv, TorchStaticKV)
+    assert stream._kv is initial
+    assert stream._kv.length == 0
 
 
 def test_map_tts_key() -> None:
