@@ -15,6 +15,7 @@ import torch
 from channellm.duplex.epoch import EpochTag
 from channellm.duplex.runtime import RealtimeRuntime
 from channellm.pipeline.stages import PipelineChunk, StageId
+from channellm.pipeline.transport import ChunkChannel
 
 
 @dataclasses.dataclass(frozen=True)
@@ -39,17 +40,23 @@ class DuplexPipelineDriver:
         duplex_session: Any,
         talker_stream: Any,
         code2wav: Any,
+        thinker_to_talker: ChunkChannel[PipelineChunk] | None = None,
+        talker_to_code2wav: ChunkChannel[PipelineChunk] | None = None,
     ) -> None:
         self.runtime = runtime
         self.duplex_session = duplex_session
         self.talker_stream = talker_stream
         self.code2wav = code2wav
+        self.thinker_to_talker = thinker_to_talker or ChunkChannel("thinker->talker")
+        self.talker_to_code2wav = talker_to_code2wav or ChunkChannel("talker->code2wav")
 
     def begin_turn(self, speech_id: str = "") -> EpochTag:
         """开始输入回合，并同步清除上一回合的 TTS/vocoder 状态。"""
         self.talker_stream.reset()
         self.code2wav.stream_reset()
-        return self.runtime.begin_turn(speech_id)
+        tag = self.runtime.begin_turn(speech_id)
+        self._discard_stale_queued_work(tag)
+        return tag
 
     def on_eou(self, tag: EpochTag) -> bool:
         """记录外部 EOU 观测；说话权仍由 duplex 模型输出决定。"""
@@ -68,6 +75,8 @@ class DuplexPipelineDriver:
         unit = ThinkerUnit(token_ids, hidden_states, decision.end_of_turn)
         talker_inputs = self.runtime.submit_stage_output(tag, StageId.THINKER, unit)
         for talker_input in talker_inputs:
+            self.thinker_to_talker.put_nowait(talker_input)
+        while (talker_input := self.thinker_to_talker.get_nowait()) is not None:
             if self.runtime.active_tag != tag:
                 return decision
             if talker_input.stage is not StageId.TALKER:
@@ -86,8 +95,24 @@ class DuplexPipelineDriver:
                 codec_tokens,
                 final=condition.end_of_turn,
             )
-            self._synthesize(tag, code2wav_inputs)
+            for code2wav_input in code2wav_inputs:
+                self.talker_to_code2wav.put_nowait(code2wav_input)
+        self._synthesize(tag, self._drain(self.talker_to_code2wav))
         return decision
+
+    @staticmethod
+    def _drain(channel: ChunkChannel[PipelineChunk]) -> list[PipelineChunk]:
+        chunks: list[PipelineChunk] = []
+        while (chunk := channel.get_nowait()) is not None:
+            chunks.append(chunk)
+        return chunks
+
+    def _discard_stale_queued_work(self, tag: EpochTag) -> None:
+        for channel in (self.thinker_to_talker, self.talker_to_code2wav):
+            channel.discard(
+                lambda chunk: (chunk.turn_epoch, chunk.speech_id)
+                != (tag.turn_epoch, tag.speech_id)
+            )
 
     def _synthesize(self, tag: EpochTag, inputs: list[PipelineChunk]) -> None:
         for index, chunk in enumerate(inputs):

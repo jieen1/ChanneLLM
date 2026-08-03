@@ -7,6 +7,7 @@ import torch
 from channellm.duplex.driver import DuplexPipelineDriver
 from channellm.duplex.runtime import RealtimeRuntime
 from channellm.pipeline.orchestrator import Orchestrator
+from channellm.pipeline.stages import PipelineChunk, StageId
 from channellm.tracing import Anchor, TraceRecorder, load_records
 
 
@@ -116,3 +117,27 @@ def test_driver_drops_stale_audio_before_running_the_thinker() -> None:
     assert session.calls == []
     assert talker.push_calls == []
     assert code2wav.calls == []
+
+
+def test_driver_barge_in_purges_stale_interstage_queue_before_it_can_run() -> None:
+    sink = FakeSink()
+    session = FakeDuplexSession(FakeDecision(is_listen=False))
+    talker = FakeTalkerStream()
+    code2wav = FakeCode2Wav()
+    driver = DuplexPipelineDriver(
+        RealtimeRuntime(Orchestrator(), sink), session, talker, code2wav
+    )
+    old_tag = driver.begin_turn("speech-old")
+    driver.thinker_to_talker.put_nowait(
+        PipelineChunk(
+            stage=StageId.TALKER,
+            source=StageId.THINKER,
+            payload="old-work",
+            turn_epoch=old_tag.turn_epoch,
+            speech_id=old_tag.speech_id,
+        )
+    )
+
+    driver.begin_turn("speech-new")
+
+    assert driver.thinker_to_talker.qsize() == 0

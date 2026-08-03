@@ -68,3 +68,15 @@ def test_subsequent_timeout_applies_after_first():
     assert got == 7
     assert item is None
     assert stats.timeouts == 1
+
+
+def test_discard_removes_only_matching_queued_items_without_counting_dequeue():
+    channel = ChunkChannel[str]("q", capacity=4)
+    channel.put_nowait("old-1")
+    channel.put_nowait("new")
+    channel.put_nowait("old-2")
+
+    assert channel.discard(lambda item: item.startswith("old")) == 2
+    assert channel.stats.dequeued == 0
+    assert channel.get_nowait() == "new"
+    assert channel.get_nowait() is None

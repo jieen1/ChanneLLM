@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import enum
+from collections.abc import Callable
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
@@ -98,3 +99,30 @@ class ChunkChannel(Generic[T]):
 
     def qsize(self) -> int:
         return self._queue.qsize()
+
+    def get_nowait(self) -> T | None:
+        """同步消费一个已就绪 chunk；空队列不计为超时。"""
+        try:
+            item = self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+        self._saw_first = True
+        self.stats.dequeued += 1
+        return item
+
+    def discard(self, predicate: Callable[[T], bool]) -> int:
+        """删除匹配的已排队项，不把旧 epoch 留给下一回合。"""
+        kept: list[T] = []
+        removed = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if predicate(item):
+                removed += 1
+            else:
+                kept.append(item)
+        for item in kept:
+            self._queue.put_nowait(item)
+        return removed
