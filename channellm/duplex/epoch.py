@@ -5,7 +5,7 @@
 客户端 jitter buffer、以及 Input/Reply/Notification/Task 四个域。
 
 新 response 到来时先 barge-in + cancel 旧的,不能 await 旧任务完成
-(参考 vllm-omni experimental/fullduplex/core/runtime.py 的 _start_response 注释)。
+(参考 vllm-omni vllm_omni/experimental/fullduplex/core/runtime.py 的 cancel-not-await 注释)。
 """
 
 from __future__ import annotations

@@ -12,9 +12,9 @@
 #8 终止输出合成          -> 上游结束下游无产出时凭空造终止输出,防客户端挂起
 #9 打断时三阶段同时取消  -> Thinker/Talker/Code2Wav/传输队列四处齐停(见 duplex.epoch)
 
-参考实现(vllm_omni/engine/orchestrator.py):
-_forward_to_next_stage:1728、_orchestration_loop、_route_output、
-_prewarm_async_chunk_stages、_cleanup_request_ids、_build_terminal_empty_output。
+参考实现(vllm_omni/engine/orchestrator.py):_build_terminal_empty_output、
+_cleanup_request_ids、_prewarm_async_chunk_stages、_forward_to_next_stage、
+_orchestration_loop、_route_output。
 明确不做:PD 分离、CFG companion、collective RPC、分布式 KV transfer、TP/PP。
 """
 

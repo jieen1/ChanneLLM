@@ -11,8 +11,8 @@ Apache 2.0,仅参考,**不作为运行时依赖**。本地路径均在 `~/projec
 | 跨阶段连接器 | `~/project/vllm-omni/vllm_omni/worker/omni_connector_model_runner_mixin.py` |
 | 拓扑与阶段定义 | `~/project/vllm-omni/vllm_omni/model_executor/models/minicpmo_4_5/pipeline.py` |
 | 三阶段模型实现 | `~/project/vllm-omni/vllm_omni/model_executor/models/minicpmo_4_5/` |
-| 双工会话控制 | `~/project/vllm-omni/experimental/fullduplex/minicpmo45/` |
-| epoch 取消最小范式 | `~/project/vllm-omni/experimental/fullduplex/core/runtime.py` |
+| 双工会话控制 | `~/project/vllm-omni/vllm_omni/experimental/fullduplex/minicpmo45/`(stage0/data_plane/adapter;注意上游在快速演进,R5) |
+| epoch 取消最小范式 | `~/project/vllm-omni/vllm_omni/experimental/fullduplex/core/runtime.py`(cancel-not-await 注释) |
 | 显存/chunk 参数基线 | `~/project/vllm-omni/vllm_omni/deploy/minicpmo_4_5*.yaml` |
 | WebRTC / 媒体面参考 | `~/project/MiniCPM-o-Demo`(gateway/worker/vad) |
 | 独立 EOU 基准 | `~/project/SoulX-Duplug`(Soul-AILab) |
