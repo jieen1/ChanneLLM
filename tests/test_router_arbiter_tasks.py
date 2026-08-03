@@ -46,3 +46,27 @@ def test_task_enqueue_persists(tmp_path):
         assert events[0].task_id == task_id
         with pytest.raises(ValueError):
             dispatcher.dispatch_one(Task(task_id=task_id, description="x", confirmed=False))
+
+
+def test_task_result_persists_then_enters_idle_window_notification(tmp_path):
+    with EventStore(tmp_path / "events.sqlite") as store:
+        arbiter = PlaybackArbiter()
+        dispatcher = TaskDispatcher(
+            store,
+            send=lambda task: f"完成：{task.description}",
+            notify=arbiter.enqueue,
+        )
+        task = Task(task_id="task-1", description="订会议室", confirmed=True, turn_id="turn-1")
+
+        assert dispatcher.dispatch_one(task) == "完成：订会议室"
+        events = list(store.iterate(kind="TaskResultReady"))
+        assert [(event.task_id, event.turn_id, event.payload) for event in events] == [
+            ("task-1", "turn-1", {"result": "完成：订会议室"})
+        ]
+        arbiter.on_user_speech_start()
+        assert arbiter.next_playable() is None
+        arbiter.on_user_speech_end()
+        notification = arbiter.next_playable()
+
+    assert notification is not None
+    assert notification.text == "完成：订会议室"
