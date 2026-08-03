@@ -24,13 +24,16 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 
 ## 验证证据
 
-1. **Thinker 结构与精度边界**:`scripts/p1_thinker_parity.py --fp32 --tokens 48`
+1. **Thinker 结构与精度边界**:`scripts/p1_thinker_parity.py --fp32 --kv-backend static --tokens 48`
    在“请用一句话介绍杭州。”上与官方 Qwen3 48/48 token 逐 token 一致
    (logits max|Δ|=0.000067);399/399 权重已赋值。相同输入的 bf16
    `sparkinfer` 路径在第 10 token 分歧，bf16 `TorchListKV` 路径在第 7 token
    分歧（prefill max|Δ| 分别为 0.875/1.039）。因此这不是可忽略的质量误差：
    bf16 只能用于性能诊断，不能作为语义质量通过或线上默认路径。P1/P2 回归
-   默认使用 fp32 + Torch SDPA 语义 KV，直至 bf16 长序列 parity 有新的实测证据。
+   默认使用 fp32 + 预分配 Torch SDPA 语义 KV，直至 bf16 长序列 parity 有新的实测证据。
+   相同 48-token 实测中，该静态 KV 路径也为 48/48 一致（prefill
+   max|Δ|=0.000067，decode 16.3 tok/s）；它只消除了逐层 `torch.cat`，不改变
+   注意力或采样语义。
 2. **语音输出**:`artifacts/p1/voice_loop_reply.wav` 文本→15.9s 连续语音。
    最近的完整自研三引擎回放(`post-runtime-voice-loop.wav`，提示“请用一句话
    介绍杭州”)也生成 12.0s/24kHz PCM；RMS=0.08664、peak=0.66208、削波比例为零、
@@ -134,14 +137,19 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     最大采样步长 0.15103–0.72485、削波比例均为零；没有
    `PCM_QUALITY_REJECTED` 或 peak 复核警告。这只证明这五个 fixture 回放样本的
    信号完整性，不等价于主观自然度、远端设备播放或长期稳定性。
-15. **质量优先的完整全双工重放**:`p1_duplex_loop.py`现默认 fp32/Torch 质量
+15. **质量优先的完整全双工重放**:`p1_duplex_loop.py`现默认 fp32/Torch-static 质量
     模式。真实 16kHz fixture 经音频前端、MiniCPM-o duplex 决策、Talker、
     Code2Wav、L3 runtime 与本地 writer 后输出“好的，没问题。”；产物
     `quality-priority-fp32-duplex.wav`为 1.68s/24kHz，RMS=0.06320、
     peak=0.42627、削波比例为零、DC=-0.00004、最大采样步长=0.12674，且 trace
     中有完整 EOU→SPEAK_DECISION→TALKER_CHUNK_READY→CODE2WAV_FIRST_PCM→
     PUBLISHED 链。这是本地单样本功能及信号完整性证据，不是主观评测、远端播放或
-    统计意义 SLO；该进程全部模型驻留后占用 35.62GiB、该轮峰值 36.60GiB。
+   统计意义 SLO。静态 KV 接入后的最近单轮产物
+   `quality-priority-static-fp32-duplex.wav`仍输出“好的，没问题。”，RMS=0.0668、
+   peak=0.3817、削波比例为零、DC=-0.00002、最大采样步长=0.10106；EOU 至首
+   PCM 为 787.7ms、speak decision 至首 PCM 为 1018.6ms（均为 cold n=1）。该
+   进程模型驻留为 35.62GiB，静态 KV 使本轮峰值达到 47.83GiB；这是明确的质量
+   保真/显存取舍，未将其描述为 SLO 或长期稳定性证据。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 

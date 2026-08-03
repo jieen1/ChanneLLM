@@ -132,7 +132,6 @@ def main() -> int:
     from channellm.engine.thinker import (
         SparkinferPagedKV,
         ThinkerConfig,
-        TorchListKV,
         load_thinker_weights,
     )
     from channellm.kernel.paged_kv import PagedKVPool
@@ -161,9 +160,17 @@ def main() -> int:
     # ---- Thinker:贪心生成回复文本 + 隐层 ----
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
     if args.thinker_dtype == "fp32":
-        # fp32 + SDPA 是当前唯一已证明长序列逐 token 对齐官方 Qwen3 的路径。
-        kv = TorchListKV()
-        kv_backend = "torch"
+        # fp32 + Torch SDPA 是当前唯一已证明长序列逐 token 对齐官方 Qwen3
+        # 的路径。预分配缓冲保留相同语义，同时避免 decode 时逐层 torch.cat。
+        kv = TorchStaticKV(
+            tconfig.num_hidden_layers,
+            tconfig.max_position_embeddings,
+            tconfig.num_kv_heads,
+            tconfig.head_dim,
+            device=device,
+            dtype=thinker_dtype,
+        )
+        kv_backend = "torch-static"
     else:
         pool = PagedKVPool(
             num_layers=tconfig.num_hidden_layers,

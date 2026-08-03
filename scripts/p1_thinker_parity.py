@@ -129,9 +129,9 @@ def main() -> int:
     parser.add_argument("--page-size", type=int, default=64)
     parser.add_argument(
         "--kv-backend",
-        choices=("sparkinfer", "torch"),
+        choices=("sparkinfer", "torch", "static"),
         default="sparkinfer",
-        help="bf16 对齐时使用的自研 KV 后端；fp32 总是使用 torch",
+        help="对齐时使用的 KV 后端；static 用预分配 Torch SDPA KV",
     )
     parser.add_argument(
         "--fp32", action="store_true", help="结构验证模式(float32,贪心必须逐 token 一致)"
@@ -164,6 +164,18 @@ def main() -> int:
     ids_cuda = ids.to(device)
 
     def make_kv():
+        if args.kv_backend == "static":
+            from channellm.engine.blocks import TorchStaticKV
+
+            config = ThinkerConfig.from_official(model_dir / "config.json")
+            return TorchStaticKV(
+                config.num_hidden_layers,
+                config.max_position_embeddings,
+                config.num_kv_heads,
+                config.head_dim,
+                device=device,
+                dtype=dtype,
+            )
         if args.fp32 or args.kv_backend == "torch":
             return TorchListKV()
         from channellm.engine.thinker import SparkinferPagedKV
@@ -192,7 +204,12 @@ def main() -> int:
         )
         return SparkinferPagedKV(pool, attn)
 
-    print(f"[backend] {'torch' if args.fp32 else args.kv_backend}")
+    backend_name = (
+        args.kv_backend
+        if args.kv_backend == "static"
+        else ("torch" if args.fp32 else args.kv_backend)
+    )
+    print(f"[backend] {backend_name}")
 
     # --- prefill logits 对比 ---
     kv = make_kv()

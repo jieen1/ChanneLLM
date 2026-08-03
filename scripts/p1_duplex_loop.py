@@ -114,12 +114,12 @@ def main() -> int:
 
     patch_torchaudio_load()
     patch_torchaudio_save()
+    from channellm.engine.blocks import TorchStaticKV
     from channellm.engine.duplex_session import DuplexSession
     from channellm.engine.talker import TalkerStream, load_talker_weights
     from channellm.engine.thinker import (
         SparkinferPagedKV,
         ThinkerConfig,
-        TorchListKV,
         load_thinker_weights,
     )
     from channellm.kernel.paged_kv import PagedKVPool
@@ -148,12 +148,17 @@ def main() -> int:
 
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
     if args.thinker_dtype == "fp32":
-        # fp32 + SDPA 是唯一通过长序列逐 token parity 的质量路径。每轮重建
-        # TorchListKV，保证不把上一个回合的连续 KV 带入当前回放。
-        def make_kv():
-            return TorchListKV()
-
-        kv_backend = "torch"
+        # fp32 + Torch SDPA 是唯一通过长序列逐 token parity 的质量路径。
+        # 静态缓存保留 SDPA 语义，避免逐 token/逐层 cat；每轮仅逻辑复位。
+        kv = TorchStaticKV(
+            tconfig.num_hidden_layers,
+            tconfig.max_position_embeddings,
+            tconfig.num_kv_heads,
+            tconfig.head_dim,
+            device=device,
+            dtype=thinker_dtype,
+        )
+        kv_backend = "torch-static"
     else:
         pool = PagedKVPool(
             num_layers=tconfig.num_hidden_layers,
@@ -205,7 +210,8 @@ def main() -> int:
     batch_id = f"{time.time_ns():x}" if args.repeat > 1 else ""
     all_records = []
     all_ok = True
-    kv = None
+    if args.thinker_dtype == "bf16":
+        kv = None
 
     for run_index in range(args.repeat):
         run_number = run_index + 1
@@ -223,10 +229,13 @@ def main() -> int:
         print(f"[run {run_number}/{args.repeat}] {temperature}: trace={run_trace}")
 
         # 每轮必须回到同样的模型会话起点；模型权重和 CUDA allocator 保持驻留。
-        if run_index and args.thinker_dtype == "bf16":
-            assert kv is not None
-            pool.free_seq(kv.seq)
-        kv = make_kv()
+        if args.thinker_dtype == "bf16":
+            if run_index:
+                assert kv is not None
+                pool.free_seq(kv.seq)
+            kv = make_kv()
+        elif run_index:
+            kv.reset()
         audio_front.reset()
         session = DuplexSession(thinker, kv, audio_front)
         session.prepare()
