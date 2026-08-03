@@ -87,6 +87,8 @@ def test_runtime_publishes_fresh_audio_and_records_trace_and_events(tmp_path):
         orchestrator.responses[(request_id, StageId.CODE2WAV)] = [chunk]
 
         emitted = runtime.submit_stage_output(tag, StageId.CODE2WAV, {"codec": [1, 2, 3]})
+        assert runtime.on_device_playout_start(tag)
+        assert runtime.on_device_playout_start(tag)
         runtime.finish_turn(tag)
 
     assert emitted == [chunk]
@@ -107,6 +109,7 @@ def test_runtime_publishes_fresh_audio_and_records_trace_and_events(tmp_path):
     assert Anchor.EOU_DETECTED in anchors
     assert Anchor.CODE2WAV_FIRST_PCM in anchors
     assert Anchor.PUBLISHED in anchors
+    assert anchors.count(Anchor.DEVICE_PLAYOUT_START) == 1
     records = load_records(trace_path)
     assert {record.trace_id for record in records} == {records[0].trace_id}
     assert records[0].trace_id
@@ -167,6 +170,20 @@ def test_runtime_finish_turn_resets_terminal_no_output_state(tmp_path):
     assert runtime.state_machine.phase is TurnPhase.LISTENING
     assert orchestrator.cleanup_calls == [request_id]
     assert events == []
+
+
+def test_runtime_does_not_log_buffered_but_never_played_pcm_as_actual_audio(tmp_path):
+    sink = BufferedPlaybackSink()
+    with EventStore(tmp_path / "events.sqlite") as store:
+        runtime = RealtimeRuntime(Orchestrator(), sink, event_store=store)
+        tag = runtime.begin_turn("speech-buffered")
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm")
+        runtime.finish_turn(tag)
+        runtime.begin_turn("speech-interrupting")
+        events = list(store.iterate())
+
+    assert [event.kind for event in events] == [EventKind.AGENT_SPEECH_PLANNED.value]
+    assert sink.muted_items == 1
 
 
 def test_runtime_only_publishes_code2wav_pcm_not_interstage_codec(tmp_path):

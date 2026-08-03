@@ -63,6 +63,8 @@ class RealtimeRuntime:
         self._active: _ActiveTurn | None = None
         self._cancelled_request_ids: list[str] = []
         self._playout_traces: dict[EpochTag, str] = {}
+        self._playout_requests: dict[EpochTag, str] = {}
+        self._started_playout_tags: set[EpochTag] = set()
         self._pending_playout: EpochTag | None = None
 
     @property
@@ -119,7 +121,15 @@ class RealtimeRuntime:
         trace_id = self._playout_traces.get(tag)
         if trace_id is None or not self._is_current(tag):
             return False
-        self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
+        if tag not in self._started_playout_tags:
+            self._started_playout_tags.add(tag)
+            self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
+            if self.event_store is not None:
+                self.event_store.append(
+                    EventKind.AGENT_SPEECH_ACTUALLY_PLAYED,
+                    turn_id=self._playout_requests.get(tag),
+                    speech_id=tag.speech_id,
+                )
         return True
 
     def on_device_playout_finished(self, tag: EpochTag) -> bool:
@@ -128,6 +138,8 @@ class RealtimeRuntime:
             return False
         self._pending_playout = None
         self._playout_traces.pop(tag, None)
+        self._playout_requests.pop(tag, None)
+        self._started_playout_tags.discard(tag)
         self.state_machine.on_playout_finished(tag)
         return True
 
@@ -194,12 +206,12 @@ class RealtimeRuntime:
         if not active.planned:
             active.planned = True
             self._playout_traces[active.tag] = active.trace_id
+            self._playout_requests[active.tag] = active.request_id
             self._pending_playout = active.tag
             self.state_machine.on_speak_start(active.tag)
             self._event(EventKind.AGENT_SPEECH_PLANNED, active)
             self._anchor(Anchor.CODE2WAV_FIRST_PCM, active.tag, active.trace_id)
         self.sink.publish(payload, active.tag)
-        self._event(EventKind.AGENT_SPEECH_ACTUALLY_PLAYED, active)
         self._anchor(Anchor.PUBLISHED, active.tag, active.trace_id)
 
     def _record_pipeline_progress(self, active: _ActiveTurn, chunk: Any) -> None:
@@ -253,6 +265,8 @@ class RealtimeRuntime:
         self.sink.mute()
         self._anchor(Anchor.PLAYOUT_MUTED, active.tag, active.trace_id)
         self._playout_traces.pop(active.tag, None)
+        self._playout_requests.pop(active.tag, None)
+        self._started_playout_tags.discard(active.tag)
         if self._pending_playout == active.tag:
             self._pending_playout = None
 
@@ -265,6 +279,8 @@ class RealtimeRuntime:
         if trace_id is not None:
             self._anchor(Anchor.PLAYOUT_MUTED, tag, trace_id)
         self._playout_traces.pop(tag, None)
+        self._playout_requests.pop(tag, None)
+        self._started_playout_tags.discard(tag)
         self._pending_playout = None
 
 

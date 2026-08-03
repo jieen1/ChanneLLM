@@ -39,6 +39,8 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
 6. **待播残音回归**:即使模型请求已完成，新输入也会清空尚未由媒体 writer
    取走的旧 PCM；只有 writer 明确报告播放结束后，下一输入才不会触发 mute。
+   `AgentSpeechActuallyPlayed` 也只在 writer 首次取走 PCM 时写入 SQLite，绝不把
+   “仅发布到待播缓冲、随后被 barge-in 丢弃”的音频伪装成已播放事实。
 
 ## 实时预算(单个本地 fixture 回放，非 SLO)
 
