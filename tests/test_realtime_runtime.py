@@ -231,6 +231,25 @@ def test_runtime_records_speak_decision_without_pcm_as_not_produced(tmp_path):
     ]
 
 
+def test_runtime_drops_empty_pcm_even_when_adapter_bypasses_driver(tmp_path):
+    sink = FakeSink()
+    with EventStore(tmp_path / "events.sqlite") as store:
+        runtime = RealtimeRuntime(Orchestrator(), sink, event_store=store)
+        tag = runtime.begin_turn("empty-adapter-pcm")
+        assert runtime.on_speak_decision(tag)
+        runtime.submit_stage_output(tag, StageId.CODE2WAV, b"")
+        assert runtime.finish_turn(tag)
+        events = list(store.iterate())
+
+    assert sink.published == []
+    assert [(event.kind, event.payload) for event in events] == [
+        (
+            EventKind.AGENT_SPEECH_NOT_PRODUCED.value,
+            {"reason": "speak_decision_without_pcm"},
+        )
+    ]
+
+
 def test_runtime_does_not_log_buffered_but_never_played_pcm_as_actual_audio(tmp_path):
     sink = BufferedPlaybackSink()
     with EventStore(tmp_path / "events.sqlite") as store:

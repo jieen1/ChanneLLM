@@ -30,6 +30,19 @@ class PlaybackSink(Protocol):
         """发布一个已经合成的 PCM 块。"""
 
 
+def _has_pcm_samples(payload: Any) -> bool:
+    """仅接受含有至少一个样本的 PCM 容器。"""
+    if payload is None:
+        return False
+    size = getattr(payload, "size", None)
+    if size is not None:
+        return bool(size)
+    try:
+        return bool(len(payload))
+    except TypeError:
+        return False
+
+
 @dataclass
 class _ActiveTurn:
     request_id: str
@@ -336,7 +349,9 @@ class RealtimeRuntime:
 
     def _publish_pcm(self, active: _ActiveTurn, chunk: Any) -> None:
         payload = getattr(chunk, "payload", None)
-        if payload is None:
+        # ``Code2Wav`` 和 driver 已执行完整 PCM 质量门禁；这里仍拒绝空块，
+        # 使绕过 driver 的适配器也不能把“没有音频”伪装成播放计划。
+        if not _has_pcm_samples(payload):
             return
         tag = _chunk_tag(chunk, active.tag)
         if tag != active.tag or not self._is_current(tag):

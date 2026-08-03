@@ -60,6 +60,7 @@ def test_stream_chunk_rejects_nonfinite_tensor_before_playback() -> None:
     ("wave", "failure"),
     [
         (torch.tensor([0.0, 1.0]), "peak 1.00000"),
+        (torch.tensor([0.0, 0.999]), "clipped ratio"),
         (torch.tensor([0.0, 0.9]), "sample step 0.90000"),
         (torch.full((8,), 0.2), "dc offset 0.20000"),
     ],
