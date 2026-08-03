@@ -120,6 +120,73 @@ def test_stream_defaults_to_reusable_static_kv() -> None:
     assert stream._kv.length == 0
 
 
+def test_stream_reused_token_buffer_matches_legacy_multi_unit_sampling() -> None:
+    """热循环的 buffer 复用不得改变固定 seed 下的 codec 序列或 KV 演进。"""
+    torch.manual_seed(31)
+    talker = Talker(tiny_config())
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+    stream = TalkerStream(talker, TorchListKV)
+    legacy_kv = TorchListKV()
+    legacy_generator = torch.Generator().manual_seed(talker.config.seed)
+
+    expected_first = _legacy_stream_push(
+        talker, legacy_kv, legacy_generator, ids, hidden, started=False
+    )
+    actual_first = stream.push(ids, hidden)
+    expected_second = _legacy_stream_push(
+        talker, legacy_kv, legacy_generator, ids, hidden, started=True
+    )
+    actual_second = stream.push(ids, hidden)
+    expected_last = _legacy_stream_push(
+        talker, legacy_kv, legacy_generator, ids, hidden, started=True, end_of_turn=True
+    )
+    actual_last = stream.push(ids, hidden, end_of_turn=True)
+
+    assert (actual_first, actual_second, actual_last) == (
+        expected_first,
+        expected_second,
+        expected_last,
+    )
+    assert stream._kv.length == 0
+    assert legacy_kv.length > 0
+
+
+@torch.no_grad()
+def _legacy_stream_push(
+    talker: Talker,
+    kv: TorchListKV,
+    generator: torch.Generator,
+    token_ids: torch.Tensor,
+    hidden_states: torch.Tensor,
+    *,
+    started: bool,
+    end_of_turn: bool = False,
+) -> list[int]:
+    """buffer 优化前的逐 token 输入路径，仅作固定种子等价基线。"""
+    cfg = talker.config
+    condition = talker.build_condition(token_ids, hidden_states, duplex=True)
+    hidden = talker.forward_embeds(condition, kv)
+    logits = talker.head_code(hidden[-1])
+    min_frames = 0 if (not started or end_of_turn) else 25
+    generated: list[int] = []
+    completed_phrase = True
+    for _ in range(25):
+        token = talker._sample_codec(
+            logits, generated, generator, min_new_tokens=min_frames
+        )
+        if token == cfg.codec_eos_token_id:
+            completed_phrase = False
+            break
+        generated.append(token)
+        token_embed = talker.emb_code(torch.tensor([token], dtype=torch.long))
+        hidden = talker.forward_embeds(token_embed, kv)
+        logits = talker.head_code(hidden[-1])
+    if completed_phrase:
+        talker._sample_codec(logits, generated, generator, min_new_tokens=min_frames)
+    return generated
+
+
 def test_map_tts_key() -> None:
     assert map_tts_key("tts.emb_text.weight") == "emb_text.weight"
     assert map_tts_key("tts.model.layers.3.self_attn.q_proj.weight") == (

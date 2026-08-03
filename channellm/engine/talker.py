@@ -341,6 +341,11 @@ class TalkerStream:
         self._kv_factory = kv_factory or _static_kv_factory(talker)
         self._kv: KVBackend
         self._generator: torch.Generator
+        self._codec_token_input = torch.empty(
+            1,
+            dtype=torch.long,
+            device=talker.emb_text.weight.device,
+        )
         self._started = False
         self.reset()
 
@@ -385,9 +390,11 @@ class TalkerStream:
                 completed_phrase = False
                 break
             generated.append(token)
-            token_embed = self.talker.emb_code(
-                torch.tensor([token], dtype=torch.long, device=condition.device)
-            )
+            # 25-frame phrase 的每一步都需要把采样 token 喂回 Talker。复用这个
+            # 单元素设备 buffer，避免每步分配一个新的 CUDA tensor；采样顺序、
+            # generator 与 KV 写入次序保持不变。
+            self._codec_token_input.fill_(token)
+            token_embed = self.talker.emb_code(self._codec_token_input)
             hidden = self.talker.forward_embeds(token_embed, self._kv)
             logits = self.talker.head_code(hidden[-1])
 
