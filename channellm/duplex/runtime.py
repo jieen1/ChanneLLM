@@ -36,6 +36,9 @@ class _ActiveTurn:
     trace_id: str
     planned: bool = False
     speak_decision: bool = False
+    streaming_prefill_started: bool = False
+    streaming_prefill_done: bool = False
+    first_token_decoded: bool = False
     talker_chunk_ready: bool = False
     cleaned: bool = False
 
@@ -125,6 +128,36 @@ class RealtimeRuntime:
         if not active.speak_decision:
             active.speak_decision = True
             self._anchor(Anchor.SPEAK_DECISION, tag, active.trace_id)
+        return True
+
+    def on_streaming_prefill_start(self, tag: EpochTag, *, ts_ns: int | None = None) -> bool:
+        """记录 Thinker 开始处理一个输入 unit 的时刻。"""
+        active = self._active
+        if active is None or active.tag != tag or not self._is_current(tag):
+            return False
+        if not active.streaming_prefill_started:
+            active.streaming_prefill_started = True
+            self._anchor(Anchor.STREAMING_PREFILL_START, tag, active.trace_id, ts_ns=ts_ns)
+        return True
+
+    def on_streaming_prefill_done(self, tag: EpochTag, *, ts_ns: int | None = None) -> bool:
+        """记录当前回复首个 Thinker token 之前的输入 prefill 已完成。"""
+        active = self._active
+        if active is None or active.tag != tag or not self._is_current(tag):
+            return False
+        if not active.streaming_prefill_done:
+            active.streaming_prefill_done = True
+            self._anchor(Anchor.THINKER_PREFILL_DONE, tag, active.trace_id, ts_ns=ts_ns)
+        return True
+
+    def on_first_token_decoded(self, tag: EpochTag, *, ts_ns: int | None = None) -> bool:
+        """记录当前回复的首个 Thinker token 已由模型采样。"""
+        active = self._active
+        if active is None or active.tag != tag or not self._is_current(tag):
+            return False
+        if not active.first_token_decoded:
+            active.first_token_decoded = True
+            self._anchor(Anchor.FIRST_TOKEN_DECODED, tag, active.trace_id, ts_ns=ts_ns)
         return True
 
     def on_device_playout_start(self, tag: EpochTag) -> bool:
@@ -250,13 +283,16 @@ class RealtimeRuntime:
     def _is_current(self, tag: EpochTag) -> bool:
         return self.epoch_guard.accept(tag)
 
-    def _anchor(self, anchor: str, tag: EpochTag, trace_id: str) -> None:
+    def _anchor(
+        self, anchor: str, tag: EpochTag, trace_id: str, *, ts_ns: int | None = None
+    ) -> None:
         if self.trace_recorder is not None:
             self.trace_recorder.anchor(
                 anchor,
                 trace_id=trace_id,
                 turn_epoch=tag.turn_epoch,
                 speech_id=tag.speech_id,
+                ts_ns=ts_ns,
             )
 
     def _new_trace_id(self) -> str:

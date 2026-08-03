@@ -232,6 +232,32 @@ def test_runtime_records_speak_decision_before_talker_output_once(tmp_path):
     assert anchors.index(Anchor.SPEAK_DECISION) < anchors.index(Anchor.TALKER_CHUNK_READY)
 
 
+def test_runtime_records_each_first_response_trace_boundary_once(tmp_path):
+    trace_path = tmp_path / "runtime.jsonl"
+    with TraceRecorder(trace_path) as recorder:
+        runtime = RealtimeRuntime(Orchestrator(), FakeSink(), trace_recorder=recorder)
+        tag = runtime.begin_turn("speech-first-token")
+        assert runtime.on_streaming_prefill_start(tag)
+        assert runtime.on_streaming_prefill_done(tag)
+        assert runtime.on_first_token_decoded(tag)
+        assert runtime.on_first_token_decoded(tag)
+        runtime.submit_stage_output(tag, StageId.TALKER, [1] * 28)
+
+    anchors = [record.anchor for record in load_records(trace_path)]
+    assert anchors.count(Anchor.STREAMING_PREFILL_START) == 1
+    assert anchors.count(Anchor.THINKER_PREFILL_DONE) == 1
+    assert anchors.count(Anchor.FIRST_TOKEN_DECODED) == 1
+    assert anchors.index(Anchor.STREAMING_PREFILL_START) < anchors.index(
+        Anchor.THINKER_PREFILL_DONE
+    )
+    assert anchors.index(Anchor.THINKER_PREFILL_DONE) < anchors.index(
+        Anchor.FIRST_TOKEN_DECODED
+    )
+    assert anchors.index(Anchor.FIRST_TOKEN_DECODED) < anchors.index(
+        Anchor.TALKER_CHUNK_READY
+    )
+
+
 def test_runtime_routes_three_stages_and_records_a_single_first_pcm_anchor(tmp_path):
     trace_path = tmp_path / "runtime.jsonl"
     sink = FakeSink()

@@ -62,6 +62,9 @@ class ChunkDecision:
     n_speak_tokens: int
     cost_embed_ms: float = 0.0  # 音频编码 + chunk prefill
     cost_decision_ms: float = 0.0  # listen/speak 决策 + 回复 token 生成
+    prefill_start_ns: int = 0
+    prefill_done_ns: int = 0
+    first_token_decoded_ns: int = 0
 
 
 class DuplexSession:
@@ -164,11 +167,13 @@ class DuplexSession:
         # 性能数字属于单机耗时，必须使用单调时钟；wall clock 的 NTP 校时会
         # 产生负延迟并污染 trace/质量报告。
         t_embed = time.monotonic()
+        prefill_start_ns = time.monotonic_ns()
         audio_embeds = self.audio_front.feed_chunk(pcm)
         unit_id = self.audio_front.unit_token_id
         embeds = torch.cat([self._embed_ids([unit_id]), audio_embeds], dim=0)
         logits = self.thinker.forward_embeds(embeds, self.kv)[-1].float()
         torch.cuda.synchronize()
+        prefill_done_ns = time.monotonic_ns()
         cost_embed_ms = (time.monotonic() - t_embed) * 1000
         t_dec = time.monotonic()
 
@@ -180,6 +185,7 @@ class DuplexSession:
         is_listen = False
         end_of_turn = False
         n_speak = 0
+        first_token_decoded_ns = 0
 
         for j in range(p.max_new_speak_tokens_per_chunk):
             if j == p.max_new_speak_tokens_per_chunk - 1:
@@ -191,6 +197,8 @@ class DuplexSession:
                 token = self._decode_step(logits)
                 if token == self.listen_id and not self.current_turn_ended:
                     token = self.tts_bos_id
+            if j == 0:
+                first_token_decoded_ns = time.monotonic_ns()
             is_listen = token == self.listen_id
             if token in self.chunk_terminator_ids:
                 break
@@ -217,7 +225,8 @@ class DuplexSession:
         cost_decision_ms = (time.monotonic() - t_dec) * 1000
         return ChunkDecision(
             is_listen, unit_ids, end_of_turn, n_speak,
-            cost_embed_ms, cost_decision_ms,
+            cost_embed_ms, cost_decision_ms, prefill_start_ns, prefill_done_ns,
+            first_token_decoded_ns,
         )
 
     def collect_conditioning(self):

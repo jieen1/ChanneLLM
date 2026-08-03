@@ -75,6 +75,16 @@ class DuplexPipelineDriver:
         if decision.is_listen or self.runtime.active_tag != tag:
             return decision
 
+        self.runtime.on_streaming_prefill_start(
+            tag, ts_ns=getattr(decision, "prefill_start_ns", None) or None
+        )
+        self.runtime.on_streaming_prefill_done(
+            tag, ts_ns=getattr(decision, "prefill_done_ns", None) or None
+        )
+        self.runtime.on_first_token_decoded(
+            tag, ts_ns=getattr(decision, "first_token_decoded_ns", None) or None
+        )
+
         # Thinker 已经给出说话判断；在启动 Talker 前落锚，不能把 Talker
         # 的首块生成耗时算进模型的 speak decision。
         if not self.runtime.on_speak_decision(tag):

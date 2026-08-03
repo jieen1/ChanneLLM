@@ -47,12 +47,13 @@ class TraceRecorder:
         turn_epoch: int = 0,
         speech_id: str = "",
         tags: dict[str, str] | None = None,
+        ts_ns: int | None = None,
         **extra: Any,
     ) -> TraceRecord:
         merged = {**self.base_tags, **(tags or {})}
         record = TraceRecord(
             anchor=anchor,
-            ts_ns=time.monotonic_ns(),
+            ts_ns=time.monotonic_ns() if ts_ns is None else ts_ns,
             wall_ns=time.time_ns(),
             trace_id=trace_id,
             turn_epoch=turn_epoch,

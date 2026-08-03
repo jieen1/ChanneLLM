@@ -54,7 +54,14 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    `p1_duplex_loop.py --queued-runtime` 也已产生完整 PCM/trace 并通过信号门禁；
    该脚本以机器速度灌入输入，故它的 2439.3ms EOU→首 PCM 只证明队列正确性，
    不可作为实时 SLO。
-8. **独立 EOU 适配**:SoulX-Duplug 只把官方 `state == "speak"` 映射为独立 EOU
+8. **可审计的首回复分段**:说话 chunk 现在写入模型内部单调时钟采集的
+   `STREAMING_PREFILL_START → THINKER_PREFILL_DONE → FIRST_TOKEN_DECODED`，并且
+   只在实际进入说话分支时落锚，避免把先前的 listen chunk 错配进回复延迟。
+   最新真实权重 queued 回放的该段为 174.2ms prefill、3.1ms 首 token、
+   616.1ms 首 token→首 Talker phrase、304.5ms 首 Code2Wav；输出为 24kHz、
+   RMS 0.0788、peak 0.3842，无信号完整性失败或人工复核警告。该 run 同样是
+   机器速度入队的功能/测量链路验证，不是实时 SLO 或主观音质结论。
+9. **独立 EOU 适配**:SoulX-Duplug 只把官方 `state == "speak"` 映射为独立 EOU
    观测，且官方状态流未提供置信度时保留为未知；该观测不进入 MiniCPM-o 的说话
    决策。当前项目 venv 缺少 SoulX 官方推理依赖，因而仅验证注入契约，未伪称模型
    已共驻运行。
