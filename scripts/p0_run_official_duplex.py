@@ -41,15 +41,21 @@ AUDIO_SILENCE_THRESHOLD = 1e-3
 
 def load_model(model_dir: Path, device: str, attn_implementation: str):
     import torch
-    from transformers import AutoModel
+    from transformers import AutoConfig, AutoModel
+
+    from channellm.models.minicpmo_compat import patch_config
 
     # 权重目录自带 modeling 代码(trust_remote_code);同时放进 sys.path,
     # 便于直接 import MiniCPMODuplex(官方 demo 的同构用法)。
     sys.path.insert(0, str(model_dir))
+    config = patch_config(
+        AutoConfig.from_pretrained(str(model_dir), trust_remote_code=True)
+    )
     model = AutoModel.from_pretrained(
         str(model_dir),
+        config=config,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         attn_implementation=attn_implementation,
     )
     model = model.to(device).eval()

@@ -31,6 +31,18 @@ cuda = [
 ]
 dev = ["pytest>=8,<9", "ruff>=0.8,<1"]
 
+# 官方 MiniCPM-o 推理路径(P0 基线)的附加依赖:权重内 modeling 代码的
+# lazy import 会被 transformers 的 import 检查器在加载时强制要求。
+# numba 下限 0.59:更早版本(0.53)无 py3.12 wheel 且与 numpy 2 不兼容,
+# 镜像源元数据可能把 librosa 解析到老 numba,必须显式钉住。
+omni = [
+  "pillow>=10,<12",
+  "librosa>=0.10,<1",
+  "numba>=0.59",
+  "tqdm>=4.66,<5",
+  "torchvision>=0.28,<1",  # processing_minicpmo 注册 image processor 需要
+]
+
 [tool.setuptools.packages.find]
 include = ["channellm*"]
 

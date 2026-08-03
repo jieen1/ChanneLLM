@@ -1,9 +1,17 @@
-# P0 固定回放集清单 —— 录音就位后逐条填充
-# eou_offset_s = 人工标注的用户说完时刻(秒),是 EOU_TO_FIRST_AUDIO 的权威口径。
-items: []
-# 示例:
-# items:
-#   - path: pause-think-001.wav
-#     category: pause-think
-#     eou_offset_s: 6.2
-#     transcript: "我在想……这个方案能不能先只做语音记录。"
+# P0 固定回放集清单
+# eou_offset_s = 用户说完时刻(秒)。当前为机器估算(末帧有声 +0.1s),
+# 正式测量前建议人工复核;无标注时脚本退回模型 is_listen 翻转近似。
+# 种子语料来自 MiniCPM-o-Demo e2e 测试固件(Apache 2.0,原地引用不复制)。
+items:
+  - path: /home/bot/project/MiniCPM-o-Demo/tests/cases/common/user_audio/当出现植物大战僵尸的时候提醒我.wav
+    category: names-numbers
+    eou_offset_s: 3.6
+    transcript: "当出现植物大战僵尸的时候提醒我。"
+  - path: /home/bot/project/MiniCPM-o-Demo/tests/cases/common/user_audio/000_user_audio0.wav
+    category: pause-think
+    eou_offset_s: 11.2
+    transcript: "(待人工转写核对)"
+  - path: /home/bot/project/MiniCPM-o-Demo/examples/realtime/assets/test.wav
+    category: backchannel
+    eou_offset_s: 1.5
+    transcript: "(待人工转写核对)"

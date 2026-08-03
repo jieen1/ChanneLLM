@@ -30,8 +30,8 @@ echo "==> base + dev"
 uv pip install --python "$PY" -e ".[dev]"
 
 if [ "${1:-}" != "--base" ]; then
-    echo "==> cuda extra (torch==2.13.0 钉版)"
-    uv pip install --python "$PY" -e ".[cuda]"
+    echo "==> cuda + omni extra (torch==2.13.0 钉版 + 官方模型路径依赖)"
+    uv pip install --python "$PY" -e ".[cuda,omni]"
 
     echo "==> sparkinfer fork (editable,依赖同样走镜像): $SPARKINFER_PATH"
     if [ -d "$SPARKINFER_PATH" ]; then
