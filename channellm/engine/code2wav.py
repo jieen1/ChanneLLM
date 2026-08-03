@@ -51,9 +51,7 @@ class Code2Wav:
 
         wav_bytes = self.t2w(list(codec_tokens), self.ref_wav_path)
         data, sample_rate = sf.read(io.BytesIO(wav_bytes), dtype="float32")
-        if sample_rate != 24000:
-            raise RuntimeError(f"Token2wav 应输出 24kHz,得到 {sample_rate}")
-        return np.asarray(data).reshape(-1)
+        return _validated_waveform(data, sample_rate)
 
     @torch.no_grad()
     def stream_reset(self) -> None:
@@ -78,10 +76,20 @@ class Code2Wav:
             list(codec_tokens), self.ref_wav_path, last_chunk=last_chunk, return_waveform=True
         )
         if isinstance(out, (bytes, bytearray)):
-            data, _ = sf.read(io.BytesIO(bytes(out)), dtype="float32")
-            return np.asarray(data).reshape(-1)
+            data, sample_rate = sf.read(io.BytesIO(bytes(out)), dtype="float32")
+            return _validated_waveform(data, sample_rate)
         wav = out if isinstance(out, torch.Tensor) else torch.as_tensor(out)
-        return wav.detach().float().cpu().numpy().reshape(-1)
+        return _validated_waveform(wav.detach().float().cpu().numpy())
+
+
+def _validated_waveform(wave: Any, sample_rate: int | None = None) -> np.ndarray:
+    """在 PCM 进入媒体层前验证 vocoder 的不变量，不改变有效波形。"""
+    if sample_rate is not None and sample_rate != 24_000:
+        raise RuntimeError(f"Token2wav 应输出 24kHz,得到 {sample_rate}")
+    samples = np.asarray(wave, dtype=np.float32).reshape(-1)
+    if not np.isfinite(samples).all():
+        raise RuntimeError("Token2wav 输出包含非有限 PCM sample")
+    return samples
 
 
 def _clone_recursive(obj: Any) -> Any:
