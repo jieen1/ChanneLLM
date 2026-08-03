@@ -90,6 +90,10 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 13. **P5 部署预检**:`scripts/media_preflight.py` 分别检查 LiveKit SDK、四项
     连接配置存在性和本地 PCM 设备，不读取或输出 secret。当前环境四项远端前提及
     本地 PCM 设备均缺失，因此 P5 仍是明确的外部环境阻塞，而非“测试通过”的假象。
+    `duplex/livekit.py` 已提供可选 SDK 适配：远端输入显式请求 16kHz 单声道，
+    下行把已通过质量门禁的 24kHz PCM 以 `AudioSource.capture_frame()` 异步背压
+    交给 LiveKit；barge-in 同时清空本地与 SDK 下行队列。适配器用 fake SDK 覆盖，
+    但当前环境没有实际 SDK/房间/设备，不能作为远端或真机证据。
 14. **输出质量故障闭环**:后续十轮真实权重回放发现两轮产生 peak=1.0 的削波，
     且最大相邻采样步长分别为 0.83481 与 0.84146；这两轮按硬门禁失败，不能作为
     质量通过证据。现在每个 Token2wav 流式块在 publish 前执行同一套硬检查；命中后

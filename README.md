@@ -48,7 +48,7 @@ make test && make lint            # 日常验证
 | P2 | 三阶段编排(九件事) | **核心完成**:unit 级 Thinker→Talker→Code2Wav、本地 GPU 回放、有界队列与旧 epoch 清理；共驻压测/超时实测待做 |
 | P3 | 双工会话控制(epoch 四处齐停) | **基础完成**:cancel-not-await、待播 PCM mute、生成结束与播放结束分离、单 GPU worker 有界输入队列（新回合不等待旧模型调用）、基于已播事件事实的崩溃恢复；真实设备/LiveKit barge-in 待测 |
 | P4 | 应用层(事件存储/仲裁/Router/任务) | **基础完成**:SQLite WAL 单写者、可重建 Markdown 投影、session-epoch 隔离的 token-budgeted ContextSnapshot、多标签 Router、空闲窗仲裁与确认后任务派发；真实 MCP/头脑风暴策略待接入 |
-| P5 | LiveKit 远程 + iOS 真机 AEC 矩阵 | 未开始 |
+| P5 | LiveKit 远程 + iOS 真机 AEC 矩阵 | **适配器基础完成**：可选 SDK 的 16k 上行/24k 下行、异步 handoff 与 barge-in 队列清空已测；真实房间、设备与 iOS AEC 矩阵仍待验收 |
 | P6 | 性能长尾 | 持续 |
 
 ## 参考实现(不作为运行时依赖)

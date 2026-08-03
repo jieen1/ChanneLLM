@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from threading import Lock
 from typing import Any, Protocol
 
@@ -17,6 +17,8 @@ from channellm.duplex.epoch import EpochTag
 
 class PlayoutLifecycle(Protocol):
     """由 L3 runtime 实现的媒体播放生命周期回调。"""
+
+    def can_device_playout_start(self, tag: EpochTag) -> bool: ...
 
     def on_device_playout_start(self, tag: EpochTag) -> bool: ...
 
@@ -102,9 +104,49 @@ class PcmPlayoutPump:
             if not items:
                 break
             pcm, tag = items[0]
-            if not self.lifecycle.on_device_playout_start(tag):
+            if not self.lifecycle.can_device_playout_start(tag):
                 continue
             self.write(pcm, tag)
+            if not self.lifecycle.on_device_playout_start(tag):
+                continue
+            written += 1
+            if self.sink.is_finished_and_drained(tag):
+                self.lifecycle.on_device_playout_finished(tag)
+        return written
+
+
+class AsyncPcmPlayoutPump:
+    """``PcmPlayoutPump`` 的异步 writer 版本，用于 LiveKit ``capture_frame``。
+
+    writer 成功接收帧后才触发实际播放 handoff，因而网络/SDK 写入失败不会制造
+    ``AgentSpeechActuallyPlayed`` 事实。每次只 drain 一帧，保留 barge-in 对尚未
+    handoff PCM 的同步清空语义。
+    """
+
+    def __init__(
+        self,
+        sink: BufferedPlaybackSink,
+        lifecycle: PlayoutLifecycle,
+        write: Callable[[Any, EpochTag], Awaitable[None]],
+    ) -> None:
+        self.sink = sink
+        self.lifecycle = lifecycle
+        self.write = write
+
+    async def pump(self, max_items: int | None = None) -> int:
+        if max_items is not None and max_items < 0:
+            raise ValueError("max_items must be non-negative")
+        written = 0
+        while max_items is None or written < max_items:
+            items = self.sink.drain(1)
+            if not items:
+                break
+            pcm, tag = items[0]
+            if not self.lifecycle.can_device_playout_start(tag):
+                continue
+            await self.write(pcm, tag)
+            if not self.lifecycle.on_device_playout_start(tag):
+                continue
             written += 1
             if self.sink.is_finished_and_drained(tag):
                 self.lifecycle.on_device_playout_finished(tag)

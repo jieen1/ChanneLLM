@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
+from channellm.app.event_store import EventKind, EventStore
 from channellm.duplex.epoch import EpochTag
-from channellm.duplex.playback import BufferedPlaybackSink, PcmPlayoutPump
+from channellm.duplex.playback import AsyncPcmPlayoutPump, BufferedPlaybackSink, PcmPlayoutPump
 from channellm.duplex.runtime import RealtimeRuntime
 from channellm.pipeline.orchestrator import Orchestrator
 from channellm.pipeline.stages import StageId
@@ -59,3 +64,36 @@ def test_barge_in_clears_buffer_before_playout_pump_can_handoff_old_pcm() -> Non
     assert PcmPlayoutPump(sink, runtime, lambda pcm, tag: written.append((pcm, tag))).pump() == 0
 
     assert written == []
+
+
+def test_writer_failure_does_not_record_played_fact(tmp_path) -> None:
+    sink = BufferedPlaybackSink()
+    with EventStore(tmp_path / "events.sqlite") as store:
+        runtime = RealtimeRuntime(Orchestrator(), sink, event_store=store)
+        tag = runtime.begin_turn("writer-failure")
+        runtime.submit_stage_output(tag, stage=StageId.CODE2WAV, payload=b"pcm")
+
+        def fail_write(_pcm: bytes, _tag: EpochTag) -> None:
+            raise OSError("device unavailable")
+
+        with pytest.raises(OSError, match="device unavailable"):
+            PcmPlayoutPump(sink, runtime, fail_write).pump()
+        events = list(store.iterate())
+
+    assert [event.kind for event in events] == [EventKind.AGENT_SPEECH_PLANNED.value]
+
+
+def test_async_pump_records_playout_only_after_successful_handoff() -> None:
+    sink = BufferedPlaybackSink()
+    runtime = RealtimeRuntime(Orchestrator(), sink)
+    tag = runtime.begin_turn("async-writer")
+    runtime.submit_stage_output(tag, stage=StageId.CODE2WAV, payload=b"pcm")
+    assert runtime.finish_turn(tag)
+    written: list[bytes] = []
+
+    async def write(pcm: bytes, _tag: EpochTag) -> None:
+        written.append(pcm)
+
+    assert asyncio.run(AsyncPcmPlayoutPump(sink, runtime, write).pump()) == 1
+    assert written == [b"pcm"]
+    assert runtime.state_machine.reply.playout_tag is None

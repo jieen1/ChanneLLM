@@ -220,9 +220,9 @@ class RealtimeRuntime:
         的 tag 会在 ``begin_turn`` 被移除，不能留下虚假的设备播放锚点。
         """
         with self._lock:
-            trace_id = self._playout_traces.get(tag)
-            if trace_id is None or not self._is_current(tag):
+            if not self.can_device_playout_start(tag):
                 return False
+            trace_id = self._playout_traces[tag]
             if tag not in self._started_playout_tags:
                 self._started_playout_tags.add(tag)
                 self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
@@ -234,6 +234,11 @@ class RealtimeRuntime:
                         speech_id=tag.speech_id,
                     )
             return True
+
+    def can_device_playout_start(self, tag: EpochTag) -> bool:
+        """媒体 writer 在 handoff 前检查 tag 是否仍可播放。"""
+        with self._lock:
+            return tag in self._playout_traces and self._is_current(tag)
 
     def on_device_playout_finished(self, tag: EpochTag) -> bool:
         """媒体 writer 已播放完当前回复的全部待播 PCM。"""
