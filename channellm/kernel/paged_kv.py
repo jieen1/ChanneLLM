@@ -103,8 +103,9 @@ class PagedKVPool:
     def append(self, layer: int, seq: SeqKVState, k: torch.Tensor, v: torch.Tensor) -> None:
         """把 n 个新 token 的 K/V 写入 seq 在 ``[length, length+n)`` 的槽位。
 
-        k/v: ``[n, num_kv_heads, head_dim]``。**不推进** ``seq.length`` ——
-        一个 token 步要对所有层各 append 一次,步末调用一次 ``seq.advance(n)``。
+        k/v: ``[n, num_kv_heads, head_dim]``,允许任意 device/dtype(写入时
+        对齐页池)。**不推进** ``seq.length`` —— 一个 token 步要对所有层各
+        append 一次,步末调用一次 ``seq.advance(n)``。
         """
         n = k.shape[0]
         if n == 0:
@@ -126,8 +127,8 @@ class PagedKVPool:
         phys = torch.tensor(
             [seq.pages[int(i)] for i in page_idx], dtype=torch.long, device=self.device
         )
-        self.k_pages[layer][phys, offset] = k.to(self.dtype)
-        self.v_pages[layer][phys, offset] = v.to(self.dtype)
+        self.k_pages[layer][phys, offset] = k.to(device=self.device, dtype=self.dtype)
+        self.v_pages[layer][phys, offset] = v.to(device=self.device, dtype=self.dtype)
 
     def free_seq(self, seq: SeqKVState) -> None:
         self.allocator.free(seq.pages)
