@@ -56,6 +56,7 @@ def load_model(model_dir: Path, device: str, attn_implementation: str):
         patch_dynamic_cache,
         patch_encoder_decoder_cache,
         patch_model_class,
+        patch_torchaudio_load,
         patch_whisper_attention,
     )
 
@@ -67,6 +68,7 @@ def load_model(model_dir: Path, device: str, attn_implementation: str):
     patch_dynamic_cache()
     patch_whisper_attention()
     patch_encoder_decoder_cache()
+    patch_torchaudio_load()
     model_cls = get_class_from_dynamic_module(config.auto_map["AutoModel"], str(model_dir))
     patch_model_class(model_cls)
     model = AutoModel.from_pretrained(
@@ -160,7 +162,7 @@ def run_one(
             if not eou_anchored:
                 anchor(Anchor.EOU_DETECTED, eou_source="approx")
                 eou_anchored = True
-            anchor(Anchor.SPEAK_DECISION)
+            anchor(Anchor.SPEAK_DECISION, chunk_idx=chunk_idx)
             speak_anchored = True
 
         out_wave = gen.get("audio_waveform")
