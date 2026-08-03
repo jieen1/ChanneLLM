@@ -128,6 +128,12 @@ def main() -> int:
     parser.add_argument("--prompt", default="请用三句话介绍一下杭州。")
     parser.add_argument("--page-size", type=int, default=64)
     parser.add_argument(
+        "--kv-backend",
+        choices=("sparkinfer", "torch"),
+        default="sparkinfer",
+        help="bf16 对齐时使用的自研 KV 后端；fp32 总是使用 torch",
+    )
+    parser.add_argument(
         "--fp32", action="store_true", help="结构验证模式(float32,贪心必须逐 token 一致)"
     )
     args = parser.parse_args()
@@ -158,7 +164,7 @@ def main() -> int:
     ids_cuda = ids.to(device)
 
     def make_kv():
-        if args.fp32:
+        if args.fp32 or args.kv_backend == "torch":
             return TorchListKV()
         from channellm.engine.thinker import SparkinferPagedKV
         from channellm.kernel.paged_kv import PagedKVPool
@@ -185,6 +191,8 @@ def main() -> int:
             device,
         )
         return SparkinferPagedKV(pool, attn)
+
+    print(f"[backend] {'torch' if args.fp32 else args.kv_backend}")
 
     # --- prefill logits 对比 ---
     kv = make_kv()

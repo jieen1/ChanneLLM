@@ -24,14 +24,23 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 
 ## 验证证据
 
-1. **Thinker 结构对齐**:`scripts/p1_thinker_parity.py --fp32` 64/64 token
-   与官方 Qwen3 逐 token 一致(logits max|Δ|=4e-5);399/399 权重逐位一致;
-   bf16 分歧为 ULP 舍入累积(层间 cos≥0.9997),非结构缺陷。
+1. **Thinker 结构与精度边界**:`scripts/p1_thinker_parity.py --fp32 --tokens 48`
+   在“请用一句话介绍杭州。”上与官方 Qwen3 48/48 token 逐 token 一致
+   (logits max|Δ|=0.000067);399/399 权重已赋值。相同输入的 bf16
+   `sparkinfer` 路径在第 10 token 分歧，bf16 `TorchListKV` 路径在第 7 token
+   分歧（prefill max|Δ| 分别为 0.875/1.039）。因此这不是可忽略的质量误差：
+   bf16 只能用于性能诊断，不能作为语义质量通过或线上默认路径。P1/P2 回归
+   默认使用 fp32 + Torch SDPA 语义 KV，直至 bf16 长序列 parity 有新的实测证据。
 2. **语音输出**:`artifacts/p1/voice_loop_reply.wav` 文本→15.9s 连续语音。
    最近的完整自研三引擎回放(`post-runtime-voice-loop.wav`，提示“请用一句话
    介绍杭州”)也生成 12.0s/24kHz PCM；RMS=0.08664、peak=0.66208、削波比例为零、
    DC=-0.00002、最大采样步长=0.30704，无完整性失败或复核警告。该样本证明
    Thinker→Talker→Code2Wav 共同加载和输出门禁，不证明语义与官方逐波形相同。
+   最新 fp32 质量模式样本`quality-priority-fp32-voice-loop.wav`输出“杭州是
+   浙江省省会，因西湖美景而闻名，是一座融合了自然风光与现代都市魅力的历史文化
+   名城。”，时长 8.12s，RMS=0.08041、peak=0.71237、削波比例为零、
+   DC=-0.00002、最大采样步长=0.29922；硬门与复核门均通过。此前 bf16 样本的
+   重复文本不能再作为质量证据。
 3. **语音输入**:`scripts/p1_audio_in.py` 流式音频→自研 Thinker→准确复述
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
@@ -120,11 +129,19 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     codec/PCM，属于独立的 Talker 空输出可用性风险，不能归为音频质量通过。该状态
     现在会落为 `AgentSpeechNotProduced`（原因 `speak_decision_without_pcm`）而非伪造
     `AgentSpeechActuallyPlayed`，以便上层选择安全重试或文字/通知降级。
-    最近五轮真实权重回放（`post-runtime-quality.batch-18c860dd30eb65a4`）均产生
+   最近五轮真实权重回放（`post-runtime-quality.batch-18c860dd30eb65a4`）均产生
     可播放 PCM 并通过完整性检查：RMS 0.07021–0.12222、peak 0.42169–0.96997、
     最大采样步长 0.15103–0.72485、削波比例均为零；没有
-    `PCM_QUALITY_REJECTED` 或 peak 复核警告。这只证明这五个 fixture 回放样本的
-    信号完整性，不等价于主观自然度、远端设备播放或长期稳定性。
+   `PCM_QUALITY_REJECTED` 或 peak 复核警告。这只证明这五个 fixture 回放样本的
+   信号完整性，不等价于主观自然度、远端设备播放或长期稳定性。
+15. **质量优先的完整全双工重放**:`p1_duplex_loop.py`现默认 fp32/Torch 质量
+    模式。真实 16kHz fixture 经音频前端、MiniCPM-o duplex 决策、Talker、
+    Code2Wav、L3 runtime 与本地 writer 后输出“好的，没问题。”；产物
+    `quality-priority-fp32-duplex.wav`为 1.68s/24kHz，RMS=0.06320、
+    peak=0.42627、削波比例为零、DC=-0.00004、最大采样步长=0.12674，且 trace
+    中有完整 EOU→SPEAK_DECISION→TALKER_CHUNK_READY→CODE2WAV_FIRST_PCM→
+    PUBLISHED 链。这是本地单样本功能及信号完整性证据，不是主观评测、远端播放或
+    统计意义 SLO；该进程全部模型驻留后占用 35.62GiB、该轮峰值 36.60GiB。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
@@ -189,3 +206,5 @@ barge-in、10/30/60 分钟 soak、stage crash/restart 仍未测，不能据此�
 3. **CUDA graph 捕获 decode 步**(sparkinfer decode 原生支持 graph replay
    + on-device metadata 重建)；
 4. **P5 媒体接入**:LiveKit/AEC/设备播放，补齐真实客户端扬声器口径与主观试听。
+5. **bf16 数值修复**:定位并消除自研 Thinker bf16 长序列与官方 Qwen3 的 token
+   分歧；在同一语义质量回归通过前，不得把 sparkinfer bf16 设为默认质量路径。

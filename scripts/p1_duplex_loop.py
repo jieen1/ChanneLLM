@@ -88,12 +88,19 @@ def main() -> int:
         action="store_true",
         help="用单 GPU worker 队列处理输入，验证 barge-in 不阻塞输入控制面。",
     )
+    parser.add_argument(
+        "--thinker-dtype",
+        choices=("fp32", "bf16"),
+        default="fp32",
+        help="默认 fp32 质量模式；bf16 仅用于性能诊断，未通过长序列 parity",
+    )
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat 必须至少为 1")
 
     device = torch.device("cuda")
-    dtype = torch.bfloat16
+    thinker_dtype = torch.float32 if args.thinker_dtype == "fp32" else torch.bfloat16
+    talker_dtype = torch.bfloat16
     model_dir = find_snapshot()
     print(f"[setup] snapshot: {model_dir}")
     print(f"[setup] wav: {args.wav}")
@@ -112,6 +119,7 @@ def main() -> int:
     from channellm.engine.thinker import (
         SparkinferPagedKV,
         ThinkerConfig,
+        TorchListKV,
         load_thinker_weights,
     )
     from channellm.kernel.paged_kv import PagedKVPool
@@ -121,15 +129,15 @@ def main() -> int:
     )
 
     t0 = time.monotonic()
-    audio_front = AudioFront(model_dir, device=device, dtype=dtype)
+    audio_front = AudioFront(model_dir, device=device, dtype=thinker_dtype)
     print(f"[load] AudioFront {time.monotonic() - t0:.1f}s")
 
     t0 = time.monotonic()
-    thinker = load_thinker_weights(model_dir, device=device, dtype=dtype)
+    thinker = load_thinker_weights(model_dir, device=device, dtype=thinker_dtype)
     print(f"[load] Thinker {time.monotonic() - t0:.1f}s")
 
     t0 = time.monotonic()
-    talker = load_talker_weights(model_dir, device=device, dtype=dtype)
+    talker = load_talker_weights(model_dir, device=device, dtype=talker_dtype)
     print(f"[load] Talker {time.monotonic() - t0:.1f}s")
 
     t0 = time.monotonic()
@@ -139,26 +147,39 @@ def main() -> int:
     print(cuda_memory_line())
 
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
-    pool = PagedKVPool(
-        num_layers=tconfig.num_hidden_layers,
-        num_pages=512,
-        page_size=64,
-        num_kv_heads=tconfig.num_kv_heads,
-        head_dim=tconfig.head_dim,
-        dtype=dtype,
-        device=device,
-    )
-    attn = SparkinferPagedAttn(
-        PagedAttnConfig(
-            num_q_heads=tconfig.num_q_heads,
+    if args.thinker_dtype == "fp32":
+        # fp32 + SDPA 是唯一通过长序列逐 token parity 的质量路径。每轮重建
+        # TorchListKV，保证不把上一个回合的连续 KV 带入当前回放。
+        def make_kv():
+            return TorchListKV()
+
+        kv_backend = "torch"
+    else:
+        pool = PagedKVPool(
+            num_layers=tconfig.num_hidden_layers,
+            num_pages=512,
+            page_size=64,
             num_kv_heads=tconfig.num_kv_heads,
             head_dim=tconfig.head_dim,
-            page_size=64,
-            dtype=dtype,
-        ),
-        device,
-    )
-    kv = SparkinferPagedKV(pool, attn)
+            dtype=thinker_dtype,
+            device=device,
+        )
+        attn = SparkinferPagedAttn(
+            PagedAttnConfig(
+                num_q_heads=tconfig.num_q_heads,
+                num_kv_heads=tconfig.num_kv_heads,
+                head_dim=tconfig.head_dim,
+                page_size=64,
+                dtype=thinker_dtype,
+            ),
+            device,
+        )
+
+        def make_kv():
+            return SparkinferPagedKV(pool, attn)
+
+        kv_backend = "sparkinfer"
+    print(f"[thinker] mode={args.thinker_dtype}/{kv_backend}")
 
     wave, sr = sf.read(str(args.wav), dtype="float32")
     if sr != 16000:
@@ -184,6 +205,7 @@ def main() -> int:
     batch_id = f"{time.time_ns():x}" if args.repeat > 1 else ""
     all_records = []
     all_ok = True
+    kv = None
 
     for run_index in range(args.repeat):
         run_number = run_index + 1
@@ -201,7 +223,10 @@ def main() -> int:
         print(f"[run {run_number}/{args.repeat}] {temperature}: trace={run_trace}")
 
         # 每轮必须回到同样的模型会话起点；模型权重和 CUDA allocator 保持驻留。
-        pool.free_seq(kv.seq)
+        if run_index and args.thinker_dtype == "bf16":
+            assert kv is not None
+            pool.free_seq(kv.seq)
+        kv = make_kv()
         audio_front.reset()
         session = DuplexSession(thinker, kv, audio_front)
         session.prepare()
