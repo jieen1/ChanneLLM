@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from channellm.engine.blocks import SparkinferPagedKV
 from channellm.kernel.paged_kv import PagedKVPool, SeqKVState
 
 
@@ -100,3 +101,65 @@ def test_page_table_and_seqlens_shapes() -> None:
     assert (table[0] >= 0).all()
     assert table[1, 1].item() == -1  # b 只有 1 页,补 -1
     assert lens.tolist() == [5, 2]
+
+
+class _RecordingAttn:
+    def __init__(self) -> None:
+        self.calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, str]] = []
+
+    def __call__(
+        self,
+        q: torch.Tensor,
+        _k_pages: torch.Tensor,
+        _v_pages: torch.Tensor,
+        page_table: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        *,
+        mode: str,
+    ) -> torch.Tensor:
+        self.calls.append((page_table, cache_seqlens, cu_seqlens_q, mode))
+        return torch.zeros_like(q)
+
+
+def test_paged_backend_reuses_step_metadata_across_layers() -> None:
+    pool = make_pool()
+    attn = _RecordingAttn()
+    kv = SparkinferPagedKV(pool, attn)
+    q = torch.zeros(1, 3, 8)
+    k = torch.zeros(1, 3, 8)
+
+    kv.begin_step(1)
+    for layer in range(2):
+        kv.append_layer(layer, k, k)
+        kv.attend(layer, q)
+
+    assert len(attn.calls) == 2
+    first, second = attn.calls
+    assert first[0] is second[0]
+    assert first[1] is second[1]
+    assert first[2] is second[2]
+    assert first[1].tolist() == [1]  # 先 append、后 attend，含当前 token
+    assert first[2].tolist() == [0, 1]
+    assert first[3] == second[3] == "decode"
+
+    kv.commit()
+    assert kv.length == 1
+    assert kv._page_table is None
+
+    # 下一步必须重建 metadata，且页表与含当前 q 的缓存长度一起增长。
+    for _ in range(3):
+        kv.begin_step(1)
+        for layer in range(2):
+            kv.append_layer(layer, k, k)
+            kv.attend(layer, q)
+        kv.commit()
+    kv.begin_step(1)
+    assert kv._page_table is not None
+    assert kv._cache_seqlens is not None
+    assert kv._page_table.shape == (1, 2)  # page_size=4，写第 5 token 时扩页
+    assert kv._cache_seqlens.tolist() == [5]
+    for layer in range(2):
+        kv.append_layer(layer, k, k)
+        kv.attend(layer, q)
+    assert attn.calls[-1][1].tolist() == [5]

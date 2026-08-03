@@ -128,6 +128,9 @@ class SparkinferPagedKV:
         self.prefix_len = 0
         self._n_new = 0
         self._slot = None
+        self._page_table: torch.Tensor | None = None
+        self._cache_seqlens: torch.Tensor | None = None
+        self._cu_seqlens_q: torch.Tensor | None = None
 
     @property
     def length(self) -> int:
@@ -137,24 +140,31 @@ class SparkinferPagedKV:
         self._n_new = n_new
         self.prefix_len = self.seq.length
         self._slot = self.pool.slot_for(self.seq, n_new) if n_new > 0 else None
+        # 同一步的每个 Transformer 层读取相同的 paged-attention metadata。
+        # 只在这里创建一次，既避免逐层的 GPU 小张量分配，也确保所有层严格
+        # 使用同一份「先 append、后 attend」长度视图。
+        self._page_table = self.pool.page_table([self.seq])
+        self._cache_seqlens = torch.tensor(
+            [self.seq.length + n_new], dtype=torch.int32, device=self.pool.device
+        )
+        self._cu_seqlens_q = torch.tensor(
+            [0, n_new], dtype=torch.int32, device=self.pool.device
+        )
 
     def append_layer(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
         self.pool.append(layer_idx, self.seq, k, v, slot=self._slot)
 
     def attend(self, layer_idx: int, q: torch.Tensor) -> torch.Tensor:
-        n_new = self._n_new
-        cache_len = self.seq.length + n_new  # SGLang 口径:含当前 q
-        page_table = self.pool.page_table([self.seq])
-        cache_seqlens = torch.tensor([cache_len], dtype=torch.int32, device=self.pool.device)
-        cu = torch.tensor([0, n_new], dtype=torch.int32, device=self.pool.device)
-        mode = "decode" if n_new == 1 else "extend"
+        if self._page_table is None or self._cache_seqlens is None or self._cu_seqlens_q is None:
+            raise RuntimeError("attend 必须在 begin_step 之后调用")
+        mode = "decode" if self._n_new == 1 else "extend"
         out = self.attn(
             q,
             self.pool.k_pages[layer_idx],
             self.pool.v_pages[layer_idx],
-            page_table,
-            cache_seqlens,
-            cu,
+            self._page_table,
+            self._cache_seqlens,
+            self._cu_seqlens_q,
             mode=mode,
         )
         return out
@@ -162,6 +172,10 @@ class SparkinferPagedKV:
     def commit(self) -> None:
         self.seq.advance(self._n_new)
         self._n_new = 0
+        self._slot = None
+        self._page_table = None
+        self._cache_seqlens = None
+        self._cu_seqlens_q = None
 
 
 
