@@ -32,13 +32,13 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
-   → DEVICE_PLAYOUT_START` 完整 trace。`--repeat 3` 现以一次模型加载后的首轮为
+   → DEVICE_PLAYOUT_START` 完整 trace。`--repeat 5` 现以一次模型加载后的首轮为
    cold、其余为 warm，并为每轮创建独立 artifact，避免既有 JSONL 污染分位数。
    单轮指定的 trace 路径也会由该脚本覆盖写入；P0 等需要累积样本的 recorder
    调用仍显式保持追加语义。
-   最新一批的三条 24kHz WAV 均无非有限值/削波/直流偏置/采样突变，RMS 为
-   0.0600–0.1215、峰值为 0.5120–0.9900、最大相邻采样步长为 0.16568–0.43680。
-   第三条有 13 个 sample ≥0.98（但没有 sample ≥0.999），因接近满幅而必须保留
+   最新一批的五条 24kHz WAV 均未触发非有限值/削波/直流偏置/采样突变门禁，RMS 为
+   0.0741–0.1517、峰值为 0.4089–0.9900、最大相邻采样步长为 0.12866–0.59177。
+   第五条有 6 个 sample ≥0.98（但没有 sample ≥0.999），因接近满幅而必须保留
    该 artifact 做人工试听。L1 Code2Wav 现在还会在 PCM 进入媒体层前拒绝非 24kHz
    WAV bytes 与非有限 sample；门禁只证明信号完整性，不证明可懂度或主观自然度。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
@@ -54,12 +54,12 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
 
 ## 实时预算(一批同进程本地 fixture 回放，非 SLO)
 
-| 段 | cold n=1 p50 | warm n=2 p50/p95/p99 | 说明 |
+| 段 | cold n=1 p50 | warm n=4 p50/p95/p99 | 说明 |
 |---|---|---|---|
-| EOU → speak decision | 466.8ms | 231.0 / 273.6 / 273.6ms | ⚠️ 真实 Thinker 首次决定开口锚点 |
-| speak decision → 首 PCM | 528.2ms | 1289.9 / 1450.5 / 1450.5ms | ⚠️ 含 Talker 首块与首段 Code2Wav |
-| EOU → 首 PCM | 995.0ms | 1563.5 / 1681.5 / 1681.5ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
-| Code2Wav 首块 | 271.1ms | 106.2 / 135.2 / 135.2ms | ⚠️ 不等于端到端客户体验 |
+| EOU → speak decision | 1033.4ms | 251.1 / 336.7 / 336.7ms | ⚠️ cold 超 1s；真实 Thinker 决策锚点 |
+| speak decision → 首 PCM | 561.4ms | 1350.3 / 1913.4 / 1913.4ms | ⚠️ 含 Talker 首块与首段 Code2Wav |
+| EOU → 首 PCM | 1594.8ms | 1601.5 / 2201.1 / 2201.1ms | ⚠️ 未达 1s，且仅本地 PCM |
+| Code2Wav 首块 | 299.2ms | 147.5 / 245.1 / 245.1ms | ⚠️ 不等于端到端客户体验 |
 
 `speak decision` 与 `talker chunk ready` 已分离记录。该批次的 cold/warm 标签仅指
 模型已经驻留后的第 1/后续实际推理轮次，**不包含权重加载**；每组样本远不足以形成
