@@ -310,8 +310,13 @@ class Thinker(nn.Module):
         token_ids: torch.Tensor,
         kv: KVBackend,
         positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """token_ids: [S] -> logits [S, vocab]。KV 读写全走 kv 后端。"""
+        output_hidden_states: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """token_ids: [S] -> logits [S, vocab]。KV 读写全走 kv 后端。
+
+        output_hidden_states=True 时额外返回每层输出(含 embed,共 L+1 个),
+        Talker 条件化与逐层对齐诊断都用它。
+        """
         seq_len = token_ids.shape[0]
         kv.begin_step(seq_len)
         if positions is None:
@@ -323,10 +328,16 @@ class Thinker(nn.Module):
         sin = sin.unsqueeze(1)
 
         hidden = self.embed_tokens(token_ids)
+        hiddens: list[torch.Tensor] = [hidden] if output_hidden_states else []
         for layer_idx, layer in enumerate(self.layers):
             hidden = layer(hidden, cos, sin, kv, layer_idx)
+            if output_hidden_states:
+                hiddens.append(hidden)
         kv.commit()
-        return self.lm_head(self.norm(hidden))
+        logits = self.lm_head(self.norm(hidden))
+        if output_hidden_states:
+            return logits, hiddens
+        return logits
 
     @torch.no_grad()
     def generate_greedy(
