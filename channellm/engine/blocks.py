@@ -113,7 +113,11 @@ class TorchListKV:
 
 
 class SparkinferPagedKV:
-    """生产后端:PagedKVPool + sparkinfer paged attention,单序列。"""
+    """生产后端:PagedKVPool + sparkinfer paged attention,单序列。
+
+    decode 热路径:每步在 begin_step 一次性算好写槽 slot,36 层 append
+    复用索引,不再逐层重建。
+    """
 
     def __init__(self, pool, attn, seq=None) -> None:
         from channellm.kernel.paged_kv import SeqKVState
@@ -123,6 +127,7 @@ class SparkinferPagedKV:
         self.seq = seq or SeqKVState()
         self.prefix_len = 0
         self._n_new = 0
+        self._slot = None
 
     @property
     def length(self) -> int:
@@ -131,9 +136,10 @@ class SparkinferPagedKV:
     def begin_step(self, n_new: int) -> None:
         self._n_new = n_new
         self.prefix_len = self.seq.length
+        self._slot = self.pool.slot_for(self.seq, n_new) if n_new > 0 else None
 
     def append_layer(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
-        self.pool.append(layer_idx, self.seq, k, v)
+        self.pool.append(layer_idx, self.seq, k, v, slot=self._slot)
 
     def attend(self, layer_idx: int, q: torch.Tensor) -> torch.Tensor:
         n_new = self._n_new

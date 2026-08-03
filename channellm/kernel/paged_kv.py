@@ -100,12 +100,39 @@ class PagedKVPool:
     def dtype(self) -> torch.dtype:
         return self.k_pages.dtype
 
-    def append(self, layer: int, seq: SeqKVState, k: torch.Tensor, v: torch.Tensor) -> None:
+    def slot_for(self, seq: SeqKVState, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """为下一步 n 个 token 预分配页槽,返回 (phys, offset)。
+
+        slot 对全部层相同 —— 每步算一次,36 层复用,decode 热路径不再
+        逐层重建索引张量。需要扩页时在此完成分配。
+        """
+        start = seq.length
+        end = start + n
+        need = seq.pages_needed(end, self.page_size) - len(seq.pages)
+        if need > 0:
+            seq.pages.extend(self.allocator.allocate(need))
+        idx = torch.arange(start, end, device=self.device)
+        page_idx = idx // self.page_size
+        offset = idx % self.page_size
+        phys = torch.tensor(
+            [seq.pages[int(i)] for i in page_idx], dtype=torch.long, device=self.device
+        )
+        return phys, offset
+
+    def append(
+        self,
+        layer: int,
+        seq: SeqKVState,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        slot: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> None:
         """把 n 个新 token 的 K/V 写入 seq 在 ``[length, length+n)`` 的槽位。
 
         k/v: ``[n, num_kv_heads, head_dim]``,允许任意 device/dtype(写入时
         对齐页池)。**不推进** ``seq.length`` —— 一个 token 步要对所有层各
-        append 一次,步末调用一次 ``seq.advance(n)``。
+        append 一次,步末调用一次 ``seq.advance(n)``。slot 传
+        ``slot_for`` 的返回值可跨层复用索引计算。
         """
         n = k.shape[0]
         if n == 0:
@@ -115,18 +142,9 @@ class PagedKVPool:
         if k.shape[1] != self.num_kv_heads or k.shape[2] != self.head_dim:
             raise ValueError("k/v 的 head 维与页池不匹配")
 
-        start = seq.length
-        end = start + n
-        need = seq.pages_needed(end, self.page_size) - len(seq.pages)
-        if need > 0:
-            seq.pages.extend(self.allocator.allocate(need))
-
-        idx = torch.arange(start, end, device=self.device)
-        page_idx = idx // self.page_size
-        offset = idx % self.page_size
-        phys = torch.tensor(
-            [seq.pages[int(i)] for i in page_idx], dtype=torch.long, device=self.device
-        )
+        if slot is None:
+            slot = self.slot_for(seq, n)
+        phys, offset = slot
         self.k_pages[layer][phys, offset] = k.to(device=self.device, dtype=self.dtype)
         self.v_pages[layer][phys, offset] = v.to(device=self.device, dtype=self.dtype)
 
