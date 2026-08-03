@@ -23,6 +23,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -37,6 +38,12 @@ from channellm.tracing.recorder import TraceRecorder, load_records  # noqa: E402
 from channellm.tracing.schema import Anchor  # noqa: E402
 
 AUDIO_SILENCE_THRESHOLD = 1e-3
+
+# TTS 参考音色(官方 demo 自带,Apache 2.0,原地引用):
+# prepare(prompt_wav_path=...) 触发 token2wav 初始化,缺它则只出 token 不出声。
+DEFAULT_REF_AUDIO = (
+    Path.home() / "project/MiniCPM-o-Demo/assets/ref_audio/ref_minicpm_signature.wav"
+)
 
 
 def load_model(model_dir: Path, device: str, attn_implementation: str):
@@ -89,6 +96,8 @@ def run_one(
     system_prompt: str,
     out_wav: Path | None,
     tags: dict[str, str],
+    silence_tail_s: float = 5.0,
+    ref_audio_path: Path | None = None,
 ) -> dict:
     trace_id = recorder.new_trace()
     turn_epoch = int(time.time())  # 回放模式下每个文件一个 epoch
@@ -98,7 +107,10 @@ def run_one(
     def anchor(name: str, **extra) -> None:
         recorder.anchor(name, trace_id=trace_id, turn_epoch=turn_epoch, tags=tags, **extra)
 
-    duplex.prepare(prefix_system_prompt=system_prompt)
+    prepare_kwargs: dict[str, Any] = {"prefix_system_prompt": system_prompt}
+    if ref_audio_path is not None:
+        prepare_kwargs["prompt_wav_path"] = str(ref_audio_path)
+    duplex.prepare(**prepare_kwargs)
     anchor(Anchor.SESSION_PREPARE_DONE)
 
     total_s = len(wave) / chunker.sample_rate
@@ -109,7 +121,17 @@ def run_one(
     pcm_parts: list[np.ndarray] = []
     chunk_idx = 0
 
-    for chunk in chunker.feed(wave):
+    # 模型靠"说话结束后的静音"判定 EOU;回放必须在 wav 之后继续喂静音,
+    # 否则模型永远停在 listen(官方 demo 的麦克风流天然包含这一段)。
+    tail_silence = np.zeros(
+        int(chunker.sample_rate * silence_tail_s), dtype=np.float32
+    )
+    all_chunks = list(chunker.feed(wave)) + list(chunker.feed(tail_silence))
+    tail = chunker.flush_tail()
+    if tail is not None:
+        all_chunks.append(tail)
+
+    for chunk in all_chunks:
         elapsed_s += len(chunk) / chunker.sample_rate
 
         anchor(Anchor.CHUNK_ALIGNED, chunk_idx=chunk_idx)
@@ -186,6 +208,12 @@ def main() -> int:
     parser.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
     parser.add_argument("--out", type=Path, default=Path("traces/p0_serial.jsonl"))
     parser.add_argument("--artifact-dir", type=Path, default=Path("artifacts/p0"))
+    parser.add_argument(
+        "--ref-audio",
+        type=Path,
+        default=DEFAULT_REF_AUDIO,
+        help="TTS 参考音色 wav;不给则 token2wav 不初始化(只出 token 不出声)",
+    )
     args = parser.parse_args()
 
     if args.audio is None and args.manifest is None:
@@ -241,6 +269,7 @@ def main() -> int:
                 args.system_prompt,
                 args.artifact_dir / f"{item['stem']}_reply.wav",
                 item["tags"],
+                ref_audio_path=args.ref_audio,
             )
             summaries.append(summary)
             print(
