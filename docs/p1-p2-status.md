@@ -5,8 +5,8 @@
 MiniCPM-o 4.5 的全双工语音闭环(音频流入 → listen/speak 决策 → 回复语音)
 已在**自研单进程 runtime**按 unit 增量跑通：Thinker 每次开口即续写 Talker
 KV，25 帧 phrase 经有界进程内队列送入 Code2Wav，再由 epoch-guarded L3
-runtime 发布本地 PCM。当前证据仅覆盖 GPU→本地 PCM；LiveKit、AEC、设备播放
-及统计意义上的 SLO 仍未完成。
+runtime 发布本地 PCM，并经可取消待播缓冲交给本地媒体 writer。当前证据仅覆盖
+GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上的 SLO 仍未完成。
 
 ## 已建成的组件
 
@@ -19,7 +19,7 @@ runtime 发布本地 PCM。当前证据仅覆盖 GPU→本地 PCM；LiveKit、AE
 | L1 引擎 | `engine/code2wav.py` Token2wav 封装 + StreamingSynth 分块流式 | ✅ 批量+流式双路径 |
 | L1 引擎 | `engine/audio_front.py` 官方流式 whisper 编码器混合封装 | ✅ 音频理解验证 |
 | L2 编排 | `pipeline/orchestrator.py` + `pipeline/transport.py` | ✅ 增量路由、有界队列、旧 epoch 清理 |
-| L3 控制 | `duplex/runtime.py` + `duplex/driver.py` | ✅ 真实三阶段驱动、cancel-not-await、仅发布当前 epoch PCM |
+| L3 控制 | `duplex/runtime.py` + `duplex/driver.py` + `duplex/playback.py` | ✅ 真实三阶段驱动、cancel-not-await、待播 PCM 静音、播放生命周期 |
 
 ## 验证证据
 
@@ -30,19 +30,22 @@ runtime 发布本地 PCM。当前证据仅覆盖 GPU→本地 PCM；LiveKit、AE
 3. **语音输入**:`scripts/p1_audio_in.py` 流式音频→自研 Thinker→准确复述
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
-   `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED`
-   完整 trace。最新一次 GPU 运行输出 24kHz / 2.000s，RMS 0.092007、峰值
-   0.678711、零削波；该门禁只证明信号完整性，不证明可懂度或主观自然度。
+   `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
+   → DEVICE_PLAYOUT_START` 完整 trace。最新一次 GPU 运行输出 24kHz / 2.000s，
+   RMS 0.067649、峰值 0.445831、零削波；该门禁只证明信号完整性，不证明可懂度
+   或主观自然度。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
+6. **待播残音回归**:即使模型请求已完成，新输入也会清空尚未由媒体 writer
+   取走的旧 PCM；只有 writer 明确报告播放结束后，下一输入才不会触发 mute。
 
 ## 实时预算(单个本地 fixture 回放，非 SLO)
 
 | 段 | 耗时 | 1s 预算 |
 |---|---|---|
-| EOU → speak decision | 2845.7ms | ⚠️ 单样本，含仍待优化的 Thinker 决策 |
-| speak decision → 首 PCM | 294.5ms | ✅ 单样本本地 GPU 路径 |
-| EOU → 首 PCM | 3140.2ms | ⚠️ 仅本地 PCM，不含网络/设备播放 |
+| EOU → speak decision | 2591.3ms | ⚠️ 单样本，含仍待优化的 Thinker 决策 |
+| speak decision → 首 PCM | 262.1ms | ✅ 单样本本地 GPU 路径 |
+| EOU → 首 PCM | 2853.3ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
 
 这些是 trace 实测，不可与其它轮次拼接，也不能代替 cold/warm、p50/p95/p99 报告。
 
@@ -62,8 +65,8 @@ runtime 发布本地 PCM。当前证据仅覆盖 GPU→本地 PCM；LiveKit、AE
 
 ## 下一步
 
-1. **P3 实测打断**:接入真实输入/播放适配器，记录 barge-in→静音 trace，验证
-   已在 GPU 中的旧请求不会泄漏到媒体端；
+1. **P3 实测打断**:接入真实输入/物理播放适配器，记录 barge-in→静音 trace，
+   验证已在 GPU 中的旧请求不会泄漏到媒体端；
 2. **性能批测**:区分 cold/warm、本地/远端，采集足够 trace 后报告 p50/p95/p99；
 3. **CUDA graph 捕获 decode 步**(sparkinfer decode 原生支持 graph replay
    + on-device metadata 重建)；
