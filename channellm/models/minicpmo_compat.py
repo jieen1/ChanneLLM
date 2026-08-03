@@ -226,3 +226,29 @@ def patch_encoder_decoder_cache() -> None:
 
     EncoderDecoderCache.__getitem__ = getitem
     EncoderDecoderCache._channellm_compat = True
+
+
+def patch_torchaudio_load() -> None:
+    """torchaudio>=2.11 默认走 torchcodec 后端,需要系统 ffmpeg;SM120 机器
+    没有 ffmpeg 库。wav 文件用 soundfile 兜底即可覆盖 P0 全部路径。"""
+    try:
+        import torchaudio
+    except ImportError:
+        return
+    if getattr(torchaudio, "_channellm_compat", False):
+        return
+    original_load = torchaudio.load
+
+    def patched_load(file, *args, **kwargs):
+        try:
+            return original_load(file, *args, **kwargs)
+        except (ImportError, OSError):
+            if str(file).lower().endswith(".wav"):
+                import soundfile as sf
+
+                data, sample_rate = sf.read(file, dtype="float32", always_2d=True)
+                return torch.from_numpy(data.T), sample_rate
+            raise
+
+    torchaudio.load = patched_load
+    torchaudio._channellm_compat = True
