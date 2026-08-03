@@ -320,3 +320,36 @@ def test_media_playout_anchor_survives_reply_cleanup_but_not_barge_in(tmp_path):
     anchors = [record.anchor for record in load_records(trace_path)]
     assert anchors.count(Anchor.DEVICE_PLAYOUT_START) == 1
     assert sink.muted_items == 1
+
+
+def test_new_input_mutes_buffered_reply_after_model_generation_has_finished(tmp_path):
+    trace_path = tmp_path / "runtime.jsonl"
+    sink = BufferedPlaybackSink()
+    with TraceRecorder(trace_path) as recorder:
+        runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
+        old_tag = runtime.begin_turn("speech-old")
+        runtime.submit_stage_output(old_tag, StageId.CODE2WAV, b"old-pcm")
+        assert runtime.finish_turn(old_tag)
+        assert sink.qsize() == 1
+
+        runtime.begin_turn("speech-new")
+
+    assert sink.qsize() == 0
+    assert sink.muted_items == 1
+    anchors = [record.anchor for record in load_records(trace_path)]
+    assert anchors.count(Anchor.BARGE_IN_DETECTED) == 1
+    assert anchors.count(Anchor.PLAYOUT_MUTED) == 1
+
+
+def test_finished_playout_is_not_muted_by_the_next_input() -> None:
+    sink = BufferedPlaybackSink()
+    runtime = RealtimeRuntime(Orchestrator(), sink)
+    tag = runtime.begin_turn("speech-finished")
+    runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm")
+    assert runtime.finish_turn(tag)
+    assert sink.drain() == [(b"pcm", tag)]
+    assert runtime.on_device_playout_finished(tag)
+
+    runtime.begin_turn("speech-next")
+
+    assert sink.muted_items == 0

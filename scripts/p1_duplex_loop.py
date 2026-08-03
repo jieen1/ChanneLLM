@@ -180,6 +180,7 @@ def main() -> int:
         played = sink.drain()
         if played:
             runtime.on_device_playout_start(played[0][1])
+            runtime.on_device_playout_finished(played[-1][1])
     torch.cuda.synchronize()
     loop_s = time.monotonic() - t0
     n_listen = sum(1 for d in decisions if d.is_listen)

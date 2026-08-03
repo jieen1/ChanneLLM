@@ -63,6 +63,7 @@ class RealtimeRuntime:
         self._active: _ActiveTurn | None = None
         self._cancelled_request_ids: list[str] = []
         self._playout_traces: dict[EpochTag, str] = {}
+        self._pending_playout: EpochTag | None = None
 
     @property
     def active_tag(self) -> EpochTag | None:
@@ -72,13 +73,9 @@ class RealtimeRuntime:
         """开始输入回合；若正在回复，先同步打断旧回合且绝不等待它。"""
         previous = self._active
         if previous is not None:
-            self._anchor(Anchor.BARGE_IN_DETECTED, previous.tag, previous.trace_id)
-            self.state_machine.on_barge_in()
-            self.orchestrator.cancel(previous.request_id)
-            self._cancelled_request_ids.append(previous.request_id)
-            self.sink.mute()
-            self._anchor(Anchor.PLAYOUT_MUTED, previous.tag, previous.trace_id)
-            self._playout_traces.pop(previous.tag, None)
+            self._barge_in_active(previous)
+        elif self._pending_playout is not None:
+            self._barge_in_pending_playout(self._pending_playout)
 
         tag = self.epoch_guard.advance(speech_id)
         request_id = new_request_id()
@@ -122,6 +119,14 @@ class RealtimeRuntime:
         if trace_id is None or not self._is_current(tag):
             return False
         self._anchor(Anchor.DEVICE_PLAYOUT_START, tag, trace_id)
+        return True
+
+    def on_device_playout_finished(self, tag: EpochTag) -> bool:
+        """媒体 writer 已播放完当前回复的全部待播 PCM。"""
+        if self._pending_playout != tag:
+            return False
+        self._pending_playout = None
+        self._playout_traces.pop(tag, None)
         return True
 
     def submit_stage_output(
@@ -187,6 +192,7 @@ class RealtimeRuntime:
         if not active.planned:
             active.planned = True
             self._playout_traces[active.tag] = active.trace_id
+            self._pending_playout = active.tag
             self.state_machine.on_speak_start()
             self._event(EventKind.AGENT_SPEECH_PLANNED, active)
             self._anchor(Anchor.CODE2WAV_FIRST_PCM, active.tag, active.trace_id)
@@ -236,6 +242,28 @@ class RealtimeRuntime:
                 turn_id=active.request_id,
                 speech_id=active.tag.speech_id,
             )
+
+    def _barge_in_active(self, active: _ActiveTurn) -> None:
+        self._anchor(Anchor.BARGE_IN_DETECTED, active.tag, active.trace_id)
+        self.state_machine.on_barge_in()
+        self.orchestrator.cancel(active.request_id)
+        self._cancelled_request_ids.append(active.request_id)
+        self.sink.mute()
+        self._anchor(Anchor.PLAYOUT_MUTED, active.tag, active.trace_id)
+        self._playout_traces.pop(active.tag, None)
+        if self._pending_playout == active.tag:
+            self._pending_playout = None
+
+    def _barge_in_pending_playout(self, tag: EpochTag) -> None:
+        trace_id = self._playout_traces.get(tag)
+        if trace_id is not None:
+            self._anchor(Anchor.BARGE_IN_DETECTED, tag, trace_id)
+        self.state_machine.on_barge_in()
+        self.sink.mute()
+        if trace_id is not None:
+            self._anchor(Anchor.PLAYOUT_MUTED, tag, trace_id)
+        self._playout_traces.pop(tag, None)
+        self._pending_playout = None
 
 
 def _chunk_tag(chunk: Any, fallback: EpochTag) -> EpochTag:
