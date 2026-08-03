@@ -41,6 +41,13 @@ def find_snapshot() -> Path:
     return snaps[0]
 
 
+def batch_artifact_path(path: Path, batch_id: str, run_number: int) -> Path:
+    """为多轮批测生成从不复用的输出文件名。"""
+    return path.with_name(
+        f"{path.stem}.batch-{batch_id}.run-{run_number}{path.suffix}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wav", type=Path, default=DEFAULT_WAV)
@@ -51,7 +58,18 @@ def main() -> int:
     parser.add_argument(
         "--trace", type=Path, default=Path("artifacts/p2/duplex_trace.jsonl")
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help=(
+            "在同一已加载模型进程内回放次数；第 1 轮标为 cold，后续为 warm。"
+            "多轮时为每轮生成唯一 trace/WAV，避免把旧样本混入统计。"
+        ),
+    )
     args = parser.parse_args()
+    if args.repeat < 1:
+        parser.error("--repeat 必须至少为 1")
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -118,9 +136,6 @@ def main() -> int:
         device,
     )
     kv = SparkinferPagedKV(pool, attn)
-    session = DuplexSession(thinker, kv, audio_front)
-    session.prepare()
-    print("[ctx] duplex session prepared")
 
     wave, sr = sf.read(str(args.wav), dtype="float32")
     if sr != 16000:
@@ -137,86 +152,134 @@ def main() -> int:
     from channellm.pipeline.orchestrator import Orchestrator
     from channellm.tracing import TraceRecorder, load_records
 
-    sink = BufferedPlaybackSink()
     # 默认连续 KV 保持 Torch SDPA 数值语义，同时避免 Talker decode 的逐层 cat。
     talker_stream = TalkerStream(talker)
-    args.trace.parent.mkdir(parents=True, exist_ok=True)
     proc = audio_front.model.processor
-    pos, idx = 0, 0
-    decisions = []
-    eou_marked = False
-    torch.cuda.synchronize()
-    t0 = time.monotonic()
-    with TraceRecorder(args.trace, session_id="p2-local-replay") as recorder:
-        runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
-        driver = DuplexPipelineDriver(runtime, session, talker_stream, code2wav)
-        tag = driver.begin_turn("local-replay")
-        while pos < len(stream):
-            if not eou_marked and pos >= len(wave):
-                driver.on_eou(tag)
-                eou_marked = True
-            n = proc.get_streaming_chunk_size()
-            piece = stream[pos : pos + n]
-            if len(piece) < n:
-                piece = np.concatenate(
-                    [piece, np.zeros(n - len(piece), dtype=np.float32)]
-                )
-            decision = driver.process_audio_chunk(tag, piece)
-            if decision is None:
-                break
-            decisions.append(decision)
-            state = "LISTEN" if decision.is_listen else f"SPEAK+{decision.n_speak_tokens}"
-            eot = " EOT" if decision.end_of_turn else ""
-            print(
-                f"[chunk{idx:02d}] {state}{eot} "
-                f"(embed {decision.cost_embed_ms:.0f}ms + 决策 {decision.cost_decision_ms:.0f}ms)"
-            )
-            pos += n
-            idx += 1
-            if runtime.active_tag is None:
-                break
-        if not eou_marked:
-            driver.on_eou(tag)
-        played = sink.drain()
-        if played:
-            runtime.on_device_playout_start(played[0][1])
-            runtime.on_device_playout_finished(played[-1][1])
-    torch.cuda.synchronize()
-    loop_s = time.monotonic() - t0
-    n_listen = sum(1 for d in decisions if d.is_listen)
-    over = [i for i, d in enumerate(decisions)
-            if d.cost_embed_ms + d.cost_decision_ms > 1000]
-    print(f"[loop] {idx} chunks / {loop_s:.2f}s, listen={n_listen} speak={idx - n_listen}")
-    print(f"[loop] 超 1s 实时预算的 chunk: {over if over else '无'}")
-
-    tok = audio_front.tokenizer
-    reply_text = tok.decode(session.res_ids, skip_special_tokens=True)
-    print(f"[reply] {reply_text[:300]!r}")
-
-    wav = (
-        np.concatenate([np.asarray(pcm, dtype=np.float32).reshape(-1) for pcm, _tag in played])
-        if played
-        else np.zeros(0, dtype=np.float32)
-    )
-    records = load_records(args.trace)
-    print(format_waterfall(waterfall(records)))
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(args.out), wav, 24000)
     from channellm.audio.quality import inspect_signal
 
-    quality = inspect_signal(wav, 24_000)
-    failures = quality.failures()
+    batch_id = f"{time.time_ns():x}" if args.repeat > 1 else ""
+    all_records = []
+    all_ok = True
+
+    for run_index in range(args.repeat):
+        run_number = run_index + 1
+        temperature = "cold" if run_index == 0 else "warm"
+        run_trace = (
+            args.trace
+            if args.repeat == 1
+            else batch_artifact_path(args.trace, batch_id, run_number)
+        )
+        run_out = (
+            args.out
+            if args.repeat == 1
+            else batch_artifact_path(args.out, batch_id, run_number)
+        )
+        print(f"[run {run_number}/{args.repeat}] {temperature}: trace={run_trace}")
+
+        # 每轮必须回到同样的模型会话起点；模型权重和 CUDA allocator 保持驻留。
+        pool.free_seq(kv.seq)
+        audio_front.reset()
+        session = DuplexSession(thinker, kv, audio_front)
+        session.prepare()
+        sink = BufferedPlaybackSink()
+        pos, idx = 0, 0
+        decisions = []
+        eou_marked = False
+        torch.cuda.synchronize()
+        t0 = time.monotonic()
+        with TraceRecorder(
+            run_trace,
+            session_id=f"p2-local-replay-{batch_id or 'single'}-{run_number}",
+            tags={"loc": "local", "temp": temperature, "run": str(run_number)},
+        ) as recorder:
+            runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
+            driver = DuplexPipelineDriver(runtime, session, talker_stream, code2wav)
+            tag = driver.begin_turn("local-replay")
+            while pos < len(stream):
+                if not eou_marked and pos >= len(wave):
+                    driver.on_eou(tag)
+                    eou_marked = True
+                n = proc.get_streaming_chunk_size()
+                piece = stream[pos : pos + n]
+                if len(piece) < n:
+                    piece = np.concatenate(
+                        [piece, np.zeros(n - len(piece), dtype=np.float32)]
+                    )
+                decision = driver.process_audio_chunk(tag, piece)
+                if decision is None:
+                    break
+                decisions.append(decision)
+                state = (
+                    "LISTEN"
+                    if decision.is_listen
+                    else f"SPEAK+{decision.n_speak_tokens}"
+                )
+                eot = " EOT" if decision.end_of_turn else ""
+                print(
+                    f"[chunk{idx:02d}] {state}{eot} "
+                    f"(embed {decision.cost_embed_ms:.0f}ms + "
+                    f"决策 {decision.cost_decision_ms:.0f}ms)"
+                )
+                pos += n
+                idx += 1
+                if runtime.active_tag is None:
+                    break
+            if not eou_marked:
+                driver.on_eou(tag)
+            played = sink.drain()
+            if played:
+                runtime.on_device_playout_start(played[0][1])
+                runtime.on_device_playout_finished(played[-1][1])
+        torch.cuda.synchronize()
+
+        loop_s = time.monotonic() - t0
+        n_listen = sum(1 for decision in decisions if decision.is_listen)
+        over = [
+            i
+            for i, decision in enumerate(decisions)
+            if decision.cost_embed_ms + decision.cost_decision_ms > 1000
+        ]
+        print(
+            f"[loop] {idx} chunks / {loop_s:.2f}s, "
+            f"listen={n_listen} speak={idx - n_listen}"
+        )
+        print(f"[loop] 超 1s 实时预算的 chunk: {over if over else '无'}")
+
+        reply_text = audio_front.tokenizer.decode(
+            session.res_ids, skip_special_tokens=True
+        )
+        print(f"[reply] {reply_text[:300]!r}")
+        wav = (
+            np.concatenate(
+                [np.asarray(pcm, dtype=np.float32).reshape(-1) for pcm, _tag in played]
+            )
+            if played
+            else np.zeros(0, dtype=np.float32)
+        )
+        run_records = load_records(run_trace)
+        all_records.extend(run_records)
+
+        run_out.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(str(run_out), wav, 24000)
+        quality = inspect_signal(wav, 24_000)
+        failures = quality.failures()
+        print(
+            f"[done] 已写入 {run_out} (rms={quality.rms:.4f}, "
+            f"peak={quality.peak:.4f}, clip={quality.clipped_ratio:.6f}, "
+            f"dc={quality.dc_offset:.5f}, max-step={quality.max_step:.5f})"
+        )
+        spoke = bool(session.res_ids)
+        ok = spoke and bool(played) and not failures
+        detail = "; ".join(failures) if failures else "signal-integrity gate passed"
+        print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke}; {detail}")
+        all_ok = all_ok and ok
+
     print(
-        f"[done] 已写入 {args.out} (rms={quality.rms:.4f}, peak={quality.peak:.4f}, "
-        f"clip={quality.clipped_ratio:.6f}, dc={quality.dc_offset:.5f}, "
-        f"max-step={quality.max_step:.5f})"
+        format_waterfall(
+            waterfall(all_records, group_by=("temp", "loc")), ("temp", "loc")
+        )
     )
-    spoke = bool(session.res_ids)
-    ok = spoke and bool(played) and not failures
-    detail = "; ".join(failures) if failures else "signal-integrity gate passed"
-    print(f"[verify] {'PASS' if ok else 'FAIL'}: 开口={spoke}; {detail}")
-    return 0 if ok else 1
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":

@@ -32,11 +32,12 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    fixture 内容(植物大战僵尸)。
 4. **真实三阶段本地回放**:`scripts/p1_duplex_loop.py` fixture 回放产生
    `EOU → SPEAK_DECISION → TALKER_CHUNK_READY → CODE2WAV_FIRST_PCM → PUBLISHED
-   → DEVICE_PLAYOUT_START` 完整 trace。2026-08-04 两次同代码 GPU 回放输出
-   24kHz，RMS 0.0654–0.0871、峰值 0.5270–0.6072、零削波、直流偏置均为
-   0.00000、最大相邻采样步长 0.10337–0.15723；门禁会拒绝空音、非有限值、削波、
-   明显直流偏置和采样突变。它只证明
-   信号完整性，不证明可懂度或主观自然度，必须保留回放样本供人工评审。
+   → DEVICE_PLAYOUT_START` 完整 trace。`--repeat 3` 现以一次模型加载后的首轮为
+   cold、其余为 warm，并为每轮创建独立 artifact，避免既有 JSONL 污染分位数。
+   最新一批的三条 24kHz WAV 均无非有限值/削波/直流偏置/采样突变，RMS 为
+   0.0600–0.1215、峰值为 0.5120–0.9900、最大相邻采样步长为 0.16568–0.43680。
+   第三条有 13 个 sample ≥0.98（但没有 sample ≥0.999），因接近满幅而必须保留
+   该 artifact 做人工试听；门禁只证明信号完整性，不证明可懂度或主观自然度。
 5. **epoch 与队列回归**:旧 Thinker/Talker 输出在进入下游前被拒绝；新 epoch
    会清除两个 interstage 队列中的旧 tag，防止旧任务继续占用 GPU。
 6. **待播残音回归**:即使模型请求已完成，新输入也会清空尚未由媒体 writer
@@ -48,18 +49,19 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    决策。当前项目 venv 缺少 SoulX 官方推理依赖，因而仅验证注入契约，未伪称模型
    已共驻运行。
 
-## 实时预算(两个本地 fixture 回放，非 SLO)
+## 实时预算(一批同进程本地 fixture 回放，非 SLO)
 
-| 段 | n=2 实测范围 | 1s 预算 |
-|---|---|---|
-| EOU → speak decision | 463.9–545.0ms | ⚠️ 真实 Thinker 首次决定开口锚点 |
-| speak decision → 首 PCM | 530.4–1521.5ms | ⚠️ 包含 Talker 首块与首段 Code2Wav 路径 |
-| EOU → 首 PCM | 1075.4–1985.4ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
+| 段 | cold n=1 p50 | warm n=2 p50/p95/p99 | 说明 |
+|---|---|---|---|
+| EOU → speak decision | 466.8ms | 231.0 / 273.6 / 273.6ms | ⚠️ 真实 Thinker 首次决定开口锚点 |
+| speak decision → 首 PCM | 528.2ms | 1289.9 / 1450.5 / 1450.5ms | ⚠️ 含 Talker 首块与首段 Code2Wav |
+| EOU → 首 PCM | 995.0ms | 1563.5 / 1681.5 / 1681.5ms | ⚠️ 仅本地 PCM，不含网络/物理设备播放 |
+| Code2Wav 首块 | 271.1ms | 106.2 / 135.2 / 135.2ms | ⚠️ 不等于端到端客户体验 |
 
-`speak decision` 与 `talker chunk ready` 已分离记录；过去把后者误作前者的单样本
-不再用于归因。以上仍只是 n=2 trace，且共享 GPU 调度会造成明显波动；不可与其它
-轮次拼接，也不能代替 cold/warm、
-p50/p95/p99 报告。
+`speak decision` 与 `talker chunk ready` 已分离记录。该批次的 cold/warm 标签仅指
+模型已经驻留后的第 1/后续实际推理轮次，**不包含权重加载**；每组样本远不足以形成
+统计意义的 SLO，且共享 GPU 调度会造成明显波动。它是按强制格式报告的可审计批次，
+不是性能承诺。
 
 ## decode 性能优化(本阶段成果)
 
