@@ -47,7 +47,7 @@ make test && make lint            # 日常验证
 | P1 | 推理内核(三子模型加载、paged attention、调度、CUDA graph、prefix cache) | **核心完成**:Thinker/Talker/Code2Wav 自研 + fp32 逐 token 对齐 + 语音闭环,见 `docs/p1-p2-status.md`;CUDA graph/prefix cache 待做 |
 | P2 | 三阶段编排(九件事) | **核心完成**:unit 级 Thinker→Talker→Code2Wav、本地 GPU 回放、有界队列与旧 epoch 清理；共驻压测/超时实测待做 |
 | P3 | 双工会话控制(epoch 四处齐停) | **基础完成**:cancel-not-await、待播 PCM mute、生成结束与播放结束分离；真实设备/LiveKit barge-in 待测 |
-| P4 | 应用层(事件存储/仲裁/Router/任务) | 未开始 |
+| P4 | 应用层(事件存储/仲裁/Router/任务) | **基础完成**:SQLite WAL 单写者、可重建 Markdown 投影、session-epoch 隔离的 token-budgeted ContextSnapshot、多标签 Router、空闲窗仲裁与确认后任务派发；真实 MCP/头脑风暴策略待接入 |
 | P5 | LiveKit 远程 + iOS 真机 AEC 矩阵 | 未开始 |
 | P6 | 性能长尾 | 持续 |
 

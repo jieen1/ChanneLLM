@@ -157,6 +157,32 @@ class EventStore:
         events = list(self.iterate(kind=kind, turn_id=turn_id))
         return events[-1] if events else None
 
+    def markdown_projection(self, session_epoch: int | None = None) -> str:
+        """从 append-only 事实事件重建 Markdown；投影本身不落库。"""
+        from channellm.app.context import render_markdown
+
+        return render_markdown(
+            self.iterate(),
+            session_epoch=self.session_epoch if session_epoch is None else session_epoch,
+        )
+
+    def context_snapshot(
+        self,
+        budget_tokens: int,
+        token_counter: Any | None = None,
+        session_epoch: int | None = None,
+    ) -> Any:
+        """按 token 预算取当前 session 的有效事实，而非按回合数硬截断。"""
+        from channellm.app.context import build_context_snapshot
+
+        kwargs = {} if token_counter is None else {"token_counter": token_counter}
+        return build_context_snapshot(
+            self.iterate(),
+            session_epoch=self.session_epoch if session_epoch is None else session_epoch,
+            budget_tokens=budget_tokens,
+            **kwargs,
+        )
+
     def close(self) -> None:
         self._conn.close()
 
