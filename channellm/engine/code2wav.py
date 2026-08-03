@@ -94,3 +94,40 @@ def _clone_recursive(obj: Any) -> Any:
         cloned = [_clone_recursive(v) for v in obj]
         return type(obj)(cloned)
     return obj
+
+
+class StreamingSynth:
+    """流式分块合成(官方 _generate_waveform_from_tokens 契约)。
+
+    缓冲 codec token:满 CHUNK_SIZE+pre_lookahead(25+3)即送一块给
+    Token2wav.stream,buffer 前进 CHUNK_SIZE(前瞻 3 帧留作下一块左上下文);
+    flush 时余量带 last_chunk 收尾。
+    """
+
+    def __init__(self, code2wav, chunk_size=25, pre_lookahead=3) -> None:
+        self.code2wav = code2wav
+        self.chunk_size = chunk_size
+        self.pre_lookahead = pre_lookahead
+        self.buffer: list[int] = []
+        self.n_chunks = 0
+        code2wav.stream_reset()
+
+    def push(self, tokens, flush=False):
+        """喂入新 codec token,返回本步产出的 24kHz float32 波形(可能为 None)。"""
+        self.buffer.extend(int(t) for t in tokens)
+        parts = []
+        need = self.chunk_size + self.pre_lookahead
+        while len(self.buffer) >= need:
+            wav = self.code2wav.stream_chunk(self.buffer[:need])
+            parts.append(wav)
+            self.buffer = self.buffer[self.chunk_size:]
+            self.n_chunks += 1
+        if flush and self.buffer:
+            parts.append(self.code2wav.stream_chunk(self.buffer, last_chunk=True))
+            self.buffer = []
+            self.n_chunks += 1
+        if not parts:
+            return None
+        import numpy as np
+
+        return np.concatenate(parts)

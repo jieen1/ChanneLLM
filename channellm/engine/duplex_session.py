@@ -19,6 +19,7 @@ sliding window 未实现(会话短于窗口时等价)。
 from __future__ import annotations
 
 import dataclasses
+import time
 
 import torch
 import torch.nn.functional as F
@@ -59,6 +60,8 @@ class ChunkDecision:
     unit_token_ids: list[int]
     end_of_turn: bool
     n_speak_tokens: int
+    cost_embed_ms: float = 0.0  # 音频编码 + chunk prefill
+    cost_decision_ms: float = 0.0  # listen/speak 决策 + 回复 token 生成
 
 
 class DuplexSession:
@@ -157,10 +160,15 @@ class DuplexSession:
     def on_chunk(self, pcm) -> ChunkDecision:
         """喂一个音频 chunk,执行 listen/speak 决策,返回本 chunk 结果。"""
         p = self.params
+        torch.cuda.synchronize()
+        t_embed = time.time()
         audio_embeds = self.audio_front.feed_chunk(pcm)
         unit_id = self.audio_front.unit_token_id
         embeds = torch.cat([self._embed_ids([unit_id]), audio_embeds], dim=0)
         logits = self.thinker.forward_embeds(embeds, self.kv)[-1].float()
+        torch.cuda.synchronize()
+        cost_embed_ms = (time.time() - t_embed) * 1000
+        t_dec = time.time()
 
         force_listen = self._generate_count < p.force_listen_count
         self._generate_count += 1
@@ -203,7 +211,12 @@ class DuplexSession:
 
         self._feed_token(self.unit_end_id)
         self.unit_records.append(unit_records)
-        return ChunkDecision(is_listen, unit_ids, end_of_turn, n_speak)
+        torch.cuda.synchronize()
+        cost_decision_ms = (time.time() - t_dec) * 1000
+        return ChunkDecision(
+            is_listen, unit_ids, end_of_turn, n_speak,
+            cost_embed_ms, cost_decision_ms,
+        )
 
     def collect_conditioning(self):
         """拍平全部单元的 (token_id, hidden, end_of_turn) 给 Talker。"""

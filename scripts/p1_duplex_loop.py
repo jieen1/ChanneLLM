@@ -142,13 +142,19 @@ def main() -> int:
         decisions.append(decision)
         tag = "LISTEN" if decision.is_listen else f"SPEAK+{decision.n_speak_tokens}"
         eot = " EOT" if decision.end_of_turn else ""
-        print(f"[chunk{idx:02d}] {tag}{eot}")
+        print(
+            f"[chunk{idx:02d}] {tag}{eot} "
+            f"(embed {decision.cost_embed_ms:.0f}ms + 决策 {decision.cost_decision_ms:.0f}ms)"
+        )
         pos += n
         idx += 1
     torch.cuda.synchronize()
     loop_s = time.time() - t0
     n_listen = sum(1 for d in decisions if d.is_listen)
+    over = [i for i, d in enumerate(decisions)
+            if d.cost_embed_ms + d.cost_decision_ms > 1000]
     print(f"[loop] {idx} chunks / {loop_s:.2f}s, listen={n_listen} speak={idx - n_listen}")
+    print(f"[loop] 超 1s 实时预算的 chunk: {over if over else '无'}")
 
     tok = audio_front.tokenizer
     reply_text = tok.decode(session.res_ids, skip_special_tokens=True)
@@ -175,12 +181,25 @@ def main() -> int:
         print("[verify] FAIL: Talker 未产出 codec token")
         return 1
 
+    from channellm.engine.code2wav import StreamingSynth
+
+    synth = StreamingSynth(code2wav)
+    torch.cuda.synchronize()
     t0 = time.time()
-    wav = code2wav.synthesize(codec_tokens)
+    ttfp = None
+    parts = []
+    piece_wav = synth.push(codec_tokens, flush=True)
+    if piece_wav is not None:
+        ttfp = time.time() - t0
+        parts.append(piece_wav)
     torch.cuda.synchronize()
     synth_s = time.time() - t0
+    wav = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
     audio_s = len(wav) / 24000
-    print(f"[code2wav] {audio_s:.2f}s 音频 / 合成 {synth_s:.2f}s")
+    print(
+        f"[code2wav-stream] {synth.n_chunks} 块 / {audio_s:.2f}s 音频 / "
+        f"合成 {synth_s:.2f}s / 首块 {ttfp * 1000 if ttfp else 0:.0f}ms"
+    )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(args.out), wav, 24000)
