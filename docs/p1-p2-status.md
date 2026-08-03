@@ -113,6 +113,11 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
     codec/PCM，属于独立的 Talker 空输出可用性风险，不能归为音频质量通过。该状态
     现在会落为 `AgentSpeechNotProduced`（原因 `speak_decision_without_pcm`）而非伪造
     `AgentSpeechActuallyPlayed`，以便上层选择安全重试或文字/通知降级。
+    最近五轮真实权重回放（`post-runtime-quality.batch-18c860dd30eb65a4`）均产生
+    可播放 PCM 并通过完整性检查：RMS 0.07021–0.12222、peak 0.42169–0.96997、
+    最大采样步长 0.15103–0.72485、削波比例均为零；没有
+    `PCM_QUALITY_REJECTED` 或 peak 复核警告。这只证明这五个 fixture 回放样本的
+    信号完整性，不等价于主观自然度、远端设备播放或长期稳定性。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
