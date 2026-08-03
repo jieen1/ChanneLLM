@@ -6,6 +6,8 @@ campplus),``Token2wav(model_path)`` 原地加载。两条路径:
 - ``synthesize``:整段 codec token 一次出 24kHz wav(首环用,已在 P0 验证);
 - ``stream_*``:官方 ``set_stream_cache``/``stream`` 的分块流式路径,
   每轮开始前用 base cache 克隆复位(官方 duplex 同款,epoch 间复用 base)。
+  上游 Flow 还会原地写入 decoder 的非持久 cache buffer；它们也必须与
+  ``stream_cache`` 一起复位，否则相同 codec 序列会跨回合漂移。
 
 参考:vllm-omni ``minicpmo_4_5_code2wav.py`` 的 prompt cache 生命周期与
 官方 modeling 2647 行附近的 stream_cache 复位逻辑。
@@ -49,6 +51,7 @@ class Code2Wav:
         self.ref_wav_path = str(ref_wav_path)
         self.t2w = Token2wav(str(assets_dir), float16=float16, n_timesteps=n_timesteps)
         self._stream_base: tuple[Any, Any] | None = None
+        self._stream_module_cache_base: tuple[tuple[str, torch.Tensor], ...] = ()
 
     @torch.no_grad()
     def synthesize(self, codec_tokens: list[int]) -> np.ndarray:
@@ -68,7 +71,11 @@ class Code2Wav:
         """(重新)建立 base cache 并复位流式状态到轮首。"""
         if self._stream_base is None:
             flow_cache, hift_cache = self.t2w.set_stream_cache(self.ref_wav_path)
-            self._stream_base = (flow_cache, hift_cache)
+            # ``inference_chunk`` 会直接写 ``flow.decoder`` 的 cache buffer。
+            # 基线必须在首轮写入前脱离这些 alias；否则后续 clone 的仍是已污染状态。
+            self._stream_base = (_clone_recursive(flow_cache), _clone_recursive(hift_cache))
+            self._stream_module_cache_base = _snapshot_stream_module_cache_buffers(self.t2w)
+        _restore_stream_module_cache_buffers(self.t2w, self._stream_module_cache_base)
         flow_base, hift_base = self._stream_base
         self.t2w.stream_cache = _clone_recursive(flow_base)
         self.t2w.hift_cache_dict = _clone_recursive(hift_base)
@@ -130,6 +137,42 @@ def _clone_recursive(obj: Any) -> Any:
         cloned = [_clone_recursive(v) for v in obj]
         return type(obj)(cloned)
     return obj
+
+
+def _snapshot_stream_module_cache_buffers(t2w: Any) -> tuple[tuple[str, torch.Tensor], ...]:
+    """捕获 Token2wav Flow 中未包含在返回 cache 的可变 buffer 基线。
+
+    stepaudio2 的 ``FlowMatching`` 在 ``forward_chunk`` 内写入
+    ``*_cache_buffer``，并将这些 buffer 的 view 返回给调用方。仅克隆返回
+    dict 不会清除模块自身的写入，因而会让下一回合从旧序列继续。
+    """
+    decoder = getattr(getattr(t2w, "flow", None), "decoder", None)
+    named_buffers = getattr(decoder, "named_buffers", None)
+    if not callable(named_buffers):
+        return ()
+    return tuple(
+        (name, buffer.clone())
+        for name, buffer in named_buffers()
+        if name.endswith("_cache_buffer")
+    )
+
+
+def _restore_stream_module_cache_buffers(
+    t2w: Any, baseline: tuple[tuple[str, torch.Tensor], ...],
+) -> None:
+    """将 Flow 的内部流式 cache 恢复到当前回合开始前的基线。"""
+    if not baseline:
+        return
+    decoder = getattr(getattr(t2w, "flow", None), "decoder", None)
+    named_buffers = getattr(decoder, "named_buffers", None)
+    if not callable(named_buffers):
+        raise RuntimeError("Token2wav Flow decoder cache buffer 不可访问")
+    current = dict(named_buffers())
+    for name, source in baseline:
+        target = current.get(name)
+        if target is None or target.shape != source.shape or target.dtype != source.dtype:
+            raise RuntimeError(f"Token2wav Flow cache buffer 与初始化基线不兼容: {name}")
+        target.copy_(source)
 
 
 class StreamingSynth:

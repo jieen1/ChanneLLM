@@ -150,6 +150,17 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    PCM 为 787.7ms、speak decision 至首 PCM 为 1018.6ms（均为 cold n=1）。该
    进程模型驻留为 35.62GiB，静态 KV 使本轮峰值达到 47.83GiB；这是明确的质量
    保真/显存取舍，未将其描述为 SLO 或长期稳定性证据。
+16. **流式 vocoder 跨回合隔离**:十轮 static-fp32 回放曾暴露相同 codec 序列的
+   波形逐轮增益累积（隔离复现 RMS 从 0.04365 升至 0.15864，峰值被归一化到
+   0.97）。根因是 stepaudio2 Flow 在模块级 ``*_cache_buffer`` 中原地写入状态，
+   原有 `stream_cache` clone 未覆盖该状态。`Code2Wav.stream_reset()` 现在同时
+   恢复四个 decoder cache buffer 的初始化快照；固定 codec 十轮复验 RMS 跨轮跨度
+   为 0.000038、峰值跨度为 0.00723。真实 fixture 十轮均产生“好的，没问题。”，
+   RMS=0.0596–0.0653、peak=0.3455–0.4206、最大采样步长=0.10116–0.12963，
+   无削波、质量拒绝或 review warning。该保护使峰值显存变为 50.50GiB，仍低于
+   85GiB 共驻门槛；cold n=1 EOU→首 PCM=830.2ms，warm n=9 为
+   p50/p95/p99=673.3/690.9/690.9ms。它证明该 fixture 的回合隔离与信号完整性，
+   仍不等价于主观听感、远端播放或长会话 soak 验收。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
