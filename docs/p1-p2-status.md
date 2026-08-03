@@ -57,6 +57,13 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    标注 EOU 后记录本地首 PCM。最近一次共享 GPU cold 样本为 1236.5ms
    EOU→首 PCM、1903.4ms speak decision→首 PCM，音频 RMS=0.0679、peak=0.4355、
    无质量告警。该样本明确反映当时 GPU 争用，不能与隔离热路径、远端或 SLO 混用。
+   2026-08-04 的三轮质量模式 paced 复测均输出“好的，没问题。”，信号门禁均通过
+   （RMS=0.0606、peak=0.4243–0.4245、无削波）；warm EOU→首 PCM 为 669.1/737.5ms。
+   但该 fixture 的 MiniCPM-o 在标注 EOU 前已作出 speak decision，因此该 EOU 数字
+   不能代表“决定开口后的首包”优化成果：对应 warm speak decision→首 PCM 为
+   1354.8/1451.9ms，Talker 25-frame 可路由块为 1500.6/1525.1ms，Code2Wav 首块为
+   103.7/128.0ms。该现象暴露首个短 codec delta 尚未凑齐 25+3 帧时必须等待下一
+   duplex unit 的结构性延迟；不得用较小的 EOU 数字掩盖它。
    最新一批的五条 24kHz WAV 均未触发非有限值/削波/直流偏置/采样突变门禁，RMS 为
    0.0741–0.1517、峰值为 0.4089–0.9900、最大相邻采样步长为 0.12866–0.59177。
    第五条有 6 个 sample ≥0.98（但没有 sample ≥0.999），因接近满幅而必须保留
@@ -188,8 +195,11 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
   微基准(GPU 空闲窗口):bind 2.72ms/次、run 仅 0.63ms/次 —— 36 层逐层
   重 bind ≈ 117ms/token 的纯适配层开销。
 - **已实施**:
-  1. `sparkinfer_attn` 静态缓冲 + 按 (mode,形状,层) 缓存 binding,
-     bind 成本在热路径摊薄为零(run 0.63ms/层);
+  1. `sparkinfer_attn` 复用 plan/scratch 与 q/output 静态缓冲；不能复用
+     `binding` 本身：六个连续 decode step 的 GPU-reference 回归证明 binding 会
+     固化 page table/cache length/cumulative-q metadata，复用会在后续 token 发生
+     语义发散。因此当前每步按最新 metadata rebind，先保证数值正确，不再把
+     “binding 成本为零”作为性能承诺;
   2. `paged_kv.slot_for` 每步一次算槽,36 层 append 复用索引;
   3. `SparkinferPagedKV` 在 `begin_step` 提升 slot，并在一个 token 的
      全部层间复用同一份页表、cache length 与 cumulative-q metadata；commit 后
@@ -210,8 +220,10 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
   37.29ms/token（26.82 tok/s）、graph 19.39ms/token（51.58 tok/s）。该原型尚未
   进入受控生产热路径，不能据此声称端到端提速或扩大质量承诺。
 - **测量说明**:全模型对比数字受共享 GPU 上不可见并发负载污染
-  (nvidia-smi 可见 60%+ 利用率但无进程归属),最终全模型数字待
-  GPU 空闲窗口复测;微基准数字为 GPU 空闲时测得,可信。
+  (nvidia-smi 可见 60%+ 利用率但无进程归属)；即使采样时显示 4% 利用率且没有
+  可见 compute process，连续三次相同 Talker 20-repeat 微基准仍得到 p50
+  196.2/259.9/277.3ms、第三次 p95=1029.7ms。故“看起来空闲”不足以证明独占，
+  当前任何全模型数字均非 SLO，必须在可验证的独占窗口重新采集足够样本。
 
 ## 共驻显存初始证据(非完整矩阵)
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
+from torch import nn
 
 from channellm.engine.blocks import TorchListKV, TorchStaticKV
 from channellm.engine.talker import Talker, TalkerConfig, TalkerStream, map_tts_key
@@ -152,6 +154,62 @@ def test_stream_reused_token_buffer_matches_legacy_multi_unit_sampling() -> None
     assert legacy_kv.length > 0
 
 
+def test_stream_reuses_same_device_token_buffer_for_each_codec_step() -> None:
+    torch.manual_seed(37)
+    talker = Talker(tiny_config())
+    stream = TalkerStream(talker, TorchListKV)
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+    original_buffer = stream._codec_token_input
+
+    class _SpyEmbedding(nn.Module):
+        def __init__(self, inner: nn.Embedding) -> None:
+            super().__init__()
+            self.inner = inner
+            self.ptrs: list[int] = []
+
+        def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+            self.ptrs.append(token_ids.data_ptr())
+            return self.inner(token_ids)
+
+    talker.emb_code = _SpyEmbedding(talker.emb_code)
+    out = stream.push(ids, hidden)
+
+    assert out
+    assert talker.emb_code.ptrs
+    assert set(talker.emb_code.ptrs) == {original_buffer.data_ptr()}
+    assert stream._codec_token_input.data_ptr() == original_buffer.data_ptr()
+
+
+def _legacy_sample_codec(
+    talker: Talker,
+    logits: torch.Tensor,
+    generated: list[int],
+    generator: torch.Generator,
+    *,
+    min_new_tokens: int | None = None,
+) -> int:
+    """优化前的官方采样步骤，作为固定种子精确回归基线。"""
+    cfg = talker.config
+    scores = logits.float().unsqueeze(0)
+    scores = scores / cfg.temperature
+    if generated:
+        input_ids = torch.tensor([generated], dtype=torch.long, device=scores.device)
+        if input_ids.size(1) > 16:
+            input_ids = input_ids.narrow(1, -16, 16)
+        freq = F.one_hot(input_ids, scores.size(1)).sum(1)
+        alpha = torch.pow(torch.tensor(cfg.repetition_penalty, device=scores.device), freq)
+        scores = torch.where(scores < 0, scores * alpha, scores / alpha)
+        top_p, top_k = talker._get_warpers()
+        scores = top_p(input_ids, scores)
+        scores = top_k(input_ids, scores)
+    minimum = cfg.min_new_tokens if min_new_tokens is None else min_new_tokens
+    if len(generated) < minimum:
+        scores[:, cfg.codec_eos_token_id] = float("-inf")
+    probs = F.softmax(scores, dim=-1)
+    return int(torch.multinomial(probs, 1, generator=generator).view(-1).item())
+
+
 @torch.no_grad()
 def _legacy_stream_push(
     talker: Talker,
@@ -172,7 +230,8 @@ def _legacy_stream_push(
     generated: list[int] = []
     completed_phrase = True
     for _ in range(25):
-        token = talker._sample_codec(
+        token = _legacy_sample_codec(
+            talker,
             logits, generated, generator, min_new_tokens=min_frames
         )
         if token == cfg.codec_eos_token_id:
@@ -183,7 +242,7 @@ def _legacy_stream_push(
         hidden = talker.forward_embeds(token_embed, kv)
         logits = talker.head_code(hidden[-1])
     if completed_phrase:
-        talker._sample_codec(logits, generated, generator, min_new_tokens=min_frames)
+        _legacy_sample_codec(talker, logits, generated, generator, min_new_tokens=min_frames)
     return generated
 
 

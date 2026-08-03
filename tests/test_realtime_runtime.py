@@ -67,6 +67,25 @@ class FakeSink:
         self.published.append((pcm, tag))
 
 
+class BlankTraceRecorder:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, int, str]] = []
+
+    def new_trace(self) -> str:
+        return "   "
+
+    def anchor(
+        self,
+        anchor: str,
+        *,
+        trace_id: str = "",
+        turn_epoch: int = 0,
+        speech_id: str = "",
+        **_extra: object,
+    ) -> None:
+        self.records.append((anchor, trace_id, turn_epoch, speech_id))
+
+
 def test_runtime_publishes_fresh_audio_and_records_trace_and_events(tmp_path):
     trace_path = tmp_path / "runtime.jsonl"
     event_path = tmp_path / "events.sqlite"
@@ -398,6 +417,13 @@ def test_runtime_routes_three_stages_and_records_a_single_first_pcm_anchor(tmp_p
     assert all(record.speech_id == tag.speech_id for record in records)
     assert len({record.trace_id for record in records}) == 1
     anchors = [record.anchor for record in records]
+    assert anchors[:5] == [
+        Anchor.EOU_DETECTED,
+        Anchor.SPEAK_DECISION,
+        Anchor.TALKER_CHUNK_READY,
+        Anchor.CODE2WAV_FIRST_PCM,
+        Anchor.PUBLISHED,
+    ]
     assert anchors.count(Anchor.SPEAK_DECISION) == 1
     assert anchors.count(Anchor.TALKER_CHUNK_READY) == 1
     assert anchors.count(Anchor.CODE2WAV_FIRST_PCM) == 1
@@ -467,6 +493,31 @@ def test_trace_pairing_does_not_cross_turns_after_barge_in(tmp_path):
     assert [(record.turn_epoch, record.speech_id) for record in pcm_records] == [
         (new_tag.turn_epoch, new_tag.speech_id)
     ]
+
+
+def test_runtime_replaces_blank_recorder_trace_ids_with_a_single_local_trace_id():
+    recorder = BlankTraceRecorder()
+    runtime = RealtimeRuntime(Orchestrator(), FakeSink(), trace_recorder=recorder)
+
+    tag = runtime.begin_turn("speech-blank-trace")
+    assert runtime.on_eou(tag)
+    assert runtime.on_speak_decision(tag)
+    runtime.submit_stage_output(tag, StageId.TALKER, [1] * 28)
+    runtime.submit_stage_output(tag, StageId.CODE2WAV, b"pcm")
+
+    anchors = [anchor for anchor, _trace_id, _turn_epoch, _speech_id in recorder.records]
+    trace_ids = {trace_id for _anchor, trace_id, _turn_epoch, _speech_id in recorder.records}
+    assert anchors == [
+        Anchor.EOU_DETECTED,
+        Anchor.SPEAK_DECISION,
+        Anchor.TALKER_CHUNK_READY,
+        Anchor.CODE2WAV_FIRST_PCM,
+        Anchor.PUBLISHED,
+    ]
+    assert len(trace_ids) == 1
+    trace_id = next(iter(trace_ids))
+    assert trace_id
+    assert trace_id.strip() == trace_id
 
 
 def test_media_playout_anchor_survives_reply_cleanup_but_not_barge_in(tmp_path):

@@ -42,12 +42,8 @@ class PagedAttnConfig:
 
 @dataclasses.dataclass
 class _StaticRun:
-    binding: object
     q_buf: torch.Tensor
     out_buf: torch.Tensor
-    pt_buf: torch.Tensor
-    cs_buf: torch.Tensor
-    cu_buf: torch.Tensor
 
 
 class SparkinferPagedAttn:
@@ -61,7 +57,12 @@ class SparkinferPagedAttn:
         self.device = torch.device(device)
         # (mode, q_cap, batch, width) -> (plan, scratch)
         self._plans: dict[tuple[int, int, int, int], tuple[object, torch.Tensor]] = {}
-        # (mode, total_q, batch, width, k_pages 数据地址) -> _StaticRun
+        # (mode, total_q, batch, width, k_pages 数据地址) -> 复用 q/output 缓冲。
+        #
+        # 不能复用 binding:实测 binding 会固化 page_table/cache_seqlens/
+        # cu_seqlens_q 的值,连续 decode 时即便原地 copy_ 新 metadata,run
+        # 仍会读取旧步长,导致第数个 token 起语义发散。这里仅缓存 plan +
+        # scratch + q/output 缓冲,每次按当前 metadata 重新 bind。
         self._runs: dict[tuple[int, int, int, int, int], _StaticRun] = {}
 
     def _get_plan(
@@ -129,31 +130,23 @@ class SparkinferPagedAttn:
                 dtype=self.config.dtype,
                 device=self.device,
             )
-            pt_buf = page_table.contiguous().clone()
-            cs_buf = cache_seqlens.contiguous().clone()
-            cu_buf = cu_seqlens_q.contiguous().clone()
-            q_buf.copy_(q)
-            binding = self._paged.bind(
-                plan,
-                scratch=scratch,
-                q=q_buf,
-                k_cache=k_pages,
-                v_cache=v_pages,
-                output=out_buf,
-                page_table=pt_buf,
-                cache_seqlens=cs_buf,
-                cu_seqlens_q=cu_buf,
-                active_total_q=total_q,
-            )
-            run = _StaticRun(binding, q_buf, out_buf, pt_buf, cs_buf, cu_buf)
+            run = _StaticRun(q_buf, out_buf)
             self._runs[run_key] = run
-        else:
-            run.q_buf.copy_(q)
-            run.pt_buf.copy_(page_table)
-            run.cs_buf.copy_(cache_seqlens)
-            run.cu_buf.copy_(cu_seqlens_q)
-
-        self._paged.run(binding=run.binding)
+        plan, scratch = self._get_plan(mode, total_q, batch, width, num_pages)
+        run.q_buf.copy_(q)
+        binding = self._paged.bind(
+            plan,
+            scratch=scratch,
+            q=run.q_buf,
+            k_cache=k_pages,
+            v_cache=v_pages,
+            output=run.out_buf,
+            page_table=page_table.contiguous(),
+            cache_seqlens=cache_seqlens.contiguous(),
+            cu_seqlens_q=cu_seqlens_q.contiguous(),
+            active_total_q=total_q,
+        )
+        self._paged.run(binding=binding)
         return run.out_buf
 
     def __call__(self, *args, **kwargs) -> torch.Tensor:

@@ -414,7 +414,17 @@ class RealtimeRuntime:
 
     def _new_trace_id(self) -> str:
         if self.trace_recorder is not None:
-            return self.trace_recorder.new_trace()
+            new_trace = getattr(self.trace_recorder, "new_trace", None)
+            if callable(new_trace):
+                return self._normalize_trace_id(new_trace())
+        return self._normalize_trace_id("")
+
+    @staticmethod
+    def _normalize_trace_id(trace_id: Any) -> str:
+        if isinstance(trace_id, str):
+            trace_id = trace_id.strip()
+            if trace_id:
+                return trace_id
         return uuid.uuid4().hex[:16]
 
     def _event(

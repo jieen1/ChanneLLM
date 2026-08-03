@@ -125,3 +125,61 @@ def test_extend_chunked_prefill_matches_reference() -> None:
         pytest.skip("sparkinfer 未安装")
     # 已有 128 前缀,再 extend 16 个新 token(cache 已含新 token)
     _run_case("extend", q_seqlens=[16], cache_seqlens=[144])
+
+
+def test_decode_rebinds_metadata_each_step() -> None:
+    if not _importable():
+        pytest.skip("sparkinfer 未安装")
+
+    from sparkinfer.attention.paged.reference import paged_attention_reference
+
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    page_size = 64
+    pool = PagedKVPool(
+        num_layers=1,
+        num_pages=64,
+        page_size=page_size,
+        num_kv_heads=8,
+        head_dim=128,
+        dtype=dtype,
+        device=device,
+    )
+    attn = SparkinferPagedAttn(
+        PagedAttnConfig(
+            num_q_heads=32, num_kv_heads=8, head_dim=128, page_size=page_size, dtype=dtype
+        ),
+        device,
+    )
+    seq = SeqKVState()
+    _fill_pool(pool, seq, 48, dtype)
+
+    q_gen = torch.Generator(device="cuda").manual_seed(17)
+    kv_gen = torch.Generator(device="cuda").manual_seed(23)
+
+    for _ in range(6):
+        slot = pool.slot_for(seq, 1)
+        k = torch.randn(1, 8, 128, generator=kv_gen, device=device, dtype=torch.float32).to(dtype)
+        v = torch.randn(1, 8, 128, generator=kv_gen, device=device, dtype=torch.float32).to(dtype)
+        pool.append(0, seq, k, v, slot=slot)
+        page_table = pool.page_table([seq])
+        cache_seqlens = torch.tensor([seq.length + 1], dtype=torch.int32, device=device)
+        cu = torch.tensor([0, 1], dtype=torch.int32, device=device)
+        q = torch.randn(1, 32, 128, generator=q_gen, device=device, dtype=torch.float32).to(dtype)
+
+        out = attn(
+            q,
+            pool.k_pages[0],
+            pool.v_pages[0],
+            page_table,
+            cache_seqlens,
+            cu,
+            mode="decode",
+        )
+        ref, _ = paged_attention_reference(
+            q, pool.k_pages[0], pool.v_pages[0], page_table, cache_seqlens, cu, causal=True
+        )
+        torch.cuda.synchronize()
+        assert (out - ref).abs().max().item() <= 0.02
+        assert _cosine(out, ref) >= 0.99999
+        seq.advance(1)
