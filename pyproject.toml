@@ -40,6 +40,8 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# third_party 是钉版 submodule(sparkinfer fork), lint 归 fork 自己管
+extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
