@@ -36,6 +36,9 @@ python scripts/preflight.py --gpu # GPU 全量检查(torch/cuda/sm120/sparkinfer
 python scripts/p0_run_official_duplex.py --manifest data/audio_set/manifest.yaml
 python scripts/p0_waterfall.py traces/*.jsonl --report artifacts/waterfall.md
 
+# P2:按真实输入节奏回放(需要带人工 EOU 标注的 fixture)
+python scripts/p1_duplex_loop.py --realtime-input --eou-offset-s 3.6
+
 make test && make lint            # 日常验证
 ```
 

@@ -69,6 +69,16 @@ def main() -> int:
     parser.add_argument("--wav", type=Path, default=DEFAULT_WAV)
     parser.add_argument("--silence-tail-s", type=float, default=6.0)
     parser.add_argument(
+        "--eou-offset-s",
+        type=float,
+        help="权威 EOU 标注秒数；默认在输入 WAV 结束处标记 EOU",
+    )
+    parser.add_argument(
+        "--realtime-input",
+        action="store_true",
+        help="按 16kHz 输入时钟回放，供本地 EOU→首 PCM 延迟测量；默认机器速度回放",
+    )
+    parser.add_argument(
         "--out", type=Path, default=Path("artifacts/p2/duplex_reply.wav")
     )
     parser.add_argument(
@@ -189,10 +199,15 @@ def main() -> int:
     wave, sr = sf.read(str(args.wav), dtype="float32")
     if sr != 16000:
         raise RuntimeError(f"需要 16kHz,得到 {sr}")
+    if args.eou_offset_s is not None and not 0.0 <= args.eou_offset_s <= len(wave) / sr:
+        parser.error("--eou-offset-s 必须在输入 WAV 的时长范围内")
     if wave.ndim > 1:
         wave = wave.mean(axis=1)
     tail = np.zeros(int(args.silence_tail_s * 16000), dtype=np.float32)
     stream = np.concatenate([wave, tail])
+    eou_sample = (
+        int(args.eou_offset_s * sr) if args.eou_offset_s is not None else len(wave)
+    )
 
     from channellm.duplex.driver import DuplexPipelineDriver
     from channellm.duplex.playback import BufferedPlaybackSink, PcmPlayoutPump
@@ -268,8 +283,14 @@ def main() -> int:
                 if queued is not None
                 else driver.begin_turn("local-replay")
             )
+            input_started_at = time.monotonic()
             while pos < len(stream):
-                if not eou_marked and pos >= len(wave):
+                if args.realtime_input:
+                    deadline = input_started_at + pos / sr
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(remaining)
+                if not eou_marked and pos >= eou_sample:
                     if queued is not None:
                         queued.on_eou(tag)
                     else:
