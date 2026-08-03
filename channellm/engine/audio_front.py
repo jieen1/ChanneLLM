@@ -8,6 +8,9 @@ avgpool)不是逐 token 热路径,直接复用官方 ``MiniCPMO.get_audio_embedd
 每 1s chunk 产出若干 4096 维 audio embedding,由自研 Thinker 的
 ``forward_embeds`` 喂入 paged KV —— duplex 协议里每个 chunk 前还要拼一个
 ``<unit>`` token embedding(官方 streaming_prefill 同款)。
+
+cnn_redundancy_ms 默认 20 对齐 MiniCPMODuplex 参数表(官方模型属性是 0,
+duplex 包装层覆盖为 20)。
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ class AudioFront:
         model_dir: str | Path,
         device: str | torch.device = "cuda",
         dtype: torch.dtype = torch.bfloat16,
+        cnn_redundancy_ms: int = 20,
     ) -> None:
         from transformers import AutoConfig, AutoProcessor
         from transformers.dynamic_module_utils import get_class_from_dynamic_module
@@ -67,6 +71,9 @@ class AudioFront:
 
         processor = AutoProcessor.from_pretrained(str(model_dir), trust_remote_code=True)
         self.model.prepare_processor(processor=processor, tokenizer=processor.tokenizer)
+        # duplex 默认 cnn_redundancy_ms=20(MiniCPMODuplex 参数表),
+        # init_streaming_processor 读模型属性,先对齐再初始化。
+        self.model.CNN_REDUNDANCY_MS = cnn_redundancy_ms
         self.model.init_streaming_processor()
         self.tokenizer = processor.tokenizer
         self.unit_token_id = self.tokenizer.convert_tokens_to_ids("<unit>")
