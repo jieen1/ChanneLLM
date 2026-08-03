@@ -43,7 +43,7 @@ make test && make lint            # 日常验证
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 官方单进程跑通 + 串行基线 waterfall | **进行中** |
+| P0 | 官方单进程跑通 + 串行基线 waterfall | **核心完成**:transformers 5.14.1 兼容跑通;串行 EOU→首包 0.98–1.74s(n=3),见 `artifacts/p0/waterfall.md` |
 | P1 | 推理内核(三子模型加载、paged attention、调度、CUDA graph、prefix cache) | 未开始 |
 | P2 | 三阶段编排(九件事) | 未开始 |
 | P3 | 双工会话控制(epoch 四处齐停) | 未开始 |
