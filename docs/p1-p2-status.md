@@ -124,6 +124,9 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
      `torch.cat`。真实权重连续 12 个贪心 codec token 与参考 `TorchListKV`
      完全一致；隔离 decode 微基准为 28.24→9.33ms/token。sparkinfer paged
      内核不支持 Talker 的 12 heads / head_dim 64，故未强行接入。
+     最新 `scripts/p1_talker_bench.py --warmup 1 --repeat 3` 固定 25 帧 phrase
+     为 p50 238.4ms、p95/p99 239.3ms（p50 9.54ms/token）；n=3 仅作隔离热路径
+     证据，不能与共享 GPU 的端到端 trace 直接比较或声明 SLO。
 - **受控 graph 原型验证**:必须在真实 prefill 前 capture，随后释放 warmup/capture
   的 dummy KV 页并同步静态页表；否则第二个 token 起会与 eager 分歧。在该生命周期
   下，真实权重的连续 8 个贪心 token 与 eager 完全相同；隔离基准为 eager

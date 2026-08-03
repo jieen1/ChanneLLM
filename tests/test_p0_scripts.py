@@ -95,3 +95,15 @@ def test_p1_duplex_loop_rejects_empty_benchmark_batch():
     )
     assert result.returncode == 2
     assert "--repeat 必须至少为 1" in result.stderr
+
+
+def test_talker_benchmark_help_documents_repeatable_measurement():
+    result = subprocess.run(
+        [str(PYTHON), str(REPO_ROOT / "scripts/p1_talker_bench.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "--repeat" in result.stdout
+    assert "25" in result.stdout
