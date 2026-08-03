@@ -16,6 +16,11 @@ class _Decision:
     end_of_turn = False
 
 
+class _SpeakingDecision:
+    is_listen = False
+    end_of_turn = False
+
+
 class _BlockingSession:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -49,15 +54,44 @@ class _Code2Wav:
         self.reset_calls += 1
 
 
+class _BlockingTalker(_Talker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def push(self, _token_ids, _hidden_states, *, end_of_turn: bool) -> list[int]:
+        assert not end_of_turn
+        self.started.set()
+        assert self.release.wait(1.0)
+        return [1, 2]
+
+
+class _SpeakingSession:
+    def latest_unit_conditioning(self):
+        return torch.tensor([1]), torch.zeros((1, 1))
+
+    def on_chunk(self, _pcm: bytes) -> _SpeakingDecision:
+        return _SpeakingDecision()
+
+
+class _StreamingCode2Wav(_Code2Wav):
+    def stream_chunk(self, tokens: list[int], last_chunk: bool = False) -> bytes:
+        assert tokens == [1, 2]
+        assert not last_chunk
+        return b"old-pcm"
+
+
 class _Sink:
     def __init__(self) -> None:
         self.mute_calls = 0
+        self.published: list[tuple[bytes, object]] = []
 
     def mute(self) -> None:
         self.mute_calls += 1
 
-    def publish(self, _pcm, _tag) -> None:
-        raise AssertionError("listen-only fake must not publish PCM")
+    def publish(self, pcm, tag) -> None:
+        self.published.append((pcm, tag))
 
 
 def _make_runtime(*, capacity: int = 16, start: bool = True):
@@ -127,3 +161,31 @@ def test_input_queue_drops_oldest_unprocessed_audio_on_overrun():
 
     assert session.calls == [b"second", b"third"]
     assert queued.stats.dropped_overrun == 1
+
+
+def test_barge_in_drops_pcm_after_an_inflight_talker_returns():
+    """旧 GPU 调用可自然结束，但其后续 stage 和媒体发布必须被 epoch 拒绝。"""
+    sink = _Sink()
+    talker = _BlockingTalker()
+    driver = DuplexPipelineDriver(
+        RealtimeRuntime(Orchestrator(codec_chunk_frames=2, codec_left_context_frames=0), sink),
+        _SpeakingSession(),
+        talker,
+        _StreamingCode2Wav(),
+    )
+    queued = QueuedDuplexRuntime(driver)
+    try:
+        old_tag = queued.begin_turn("old")
+        assert queued.submit_audio(old_tag, b"old")
+        assert talker.started.wait(0.5)
+
+        queued.begin_turn("new")
+        talker.release.set()
+        assert queued.wait_idle(1.0)
+    finally:
+        talker.release.set()
+        assert queued.close()
+
+    assert sink.mute_calls == 1
+    assert sink.published == []
+    assert queued.failures == []
