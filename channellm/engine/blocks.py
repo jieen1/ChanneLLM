@@ -202,14 +202,24 @@ class SparkinferPagedKV:
 
     decode 热路径:每步在 begin_step 一次性算好写槽 slot,36 层 append
     复用索引,不再逐层重建。
+
+    prefill(多 token)路径:实测 sparkinfer extend 每层 bind ~2.9ms,11 token
+    的音频 chunk prefill 仅 bind 就要 ~105ms;而该场景是带宽受限的小负载。
+    因此 prefill 改走 Torch SDPA:把当前序列已写入的页就地 gather 成连续
+    [L, heads, dim](拷贝量仅 MB 级)再 SDPA——这正是 fp32 parity 时代验证
+    过的内核族,无 plan/bind 开销。decode 单 token 仍走 sparkinfer(graph
+    replay 在其上捕获)。``prefill_backend="sparkinfer"`` 保留旧路径供 A/B。
     """
 
-    def __init__(self, pool, attn, seq=None) -> None:
+    def __init__(self, pool, attn, seq=None, prefill_backend: str = "sdpa") -> None:
         from channellm.kernel.paged_kv import SeqKVState
 
+        if prefill_backend not in ("sdpa", "sparkinfer"):
+            raise ValueError("prefill_backend 必须是 sdpa/sparkinfer")
         self.pool = pool
         self.attn = attn
         self.seq = seq or SeqKVState()
+        self.prefill_backend = prefill_backend
         self.prefix_len = 0
         self._n_new = 0
         self._slot = None
@@ -240,19 +250,68 @@ class SparkinferPagedKV:
         self.pool.append(layer_idx, self.seq, k, v, slot=self._slot)
 
     def attend(self, layer_idx: int, q: torch.Tensor) -> torch.Tensor:
+        if self._n_new == 1:
+            if (
+                self._page_table is None
+                or self._cache_seqlens is None
+                or self._cu_seqlens_q is None
+            ):
+                raise RuntimeError("attend 必须在 begin_step 之后调用")
+            return self.attn(
+                q,
+                self.pool.k_pages[layer_idx],
+                self.pool.v_pages[layer_idx],
+                self._page_table,
+                self._cache_seqlens,
+                self._cu_seqlens_q,
+                mode="decode",
+            )
+        if self.prefill_backend == "sdpa":
+            return self._attend_prefill_sdpa(layer_idx, q)
         if self._page_table is None or self._cache_seqlens is None or self._cu_seqlens_q is None:
             raise RuntimeError("attend 必须在 begin_step 之后调用")
-        mode = "decode" if self._n_new == 1 else "extend"
-        out = self.attn(
+        return self.attn(
             q,
             self.pool.k_pages[layer_idx],
             self.pool.v_pages[layer_idx],
             self._page_table,
             self._cache_seqlens,
             self._cu_seqlens_q,
-            mode=mode,
+            mode="extend",
         )
-        return out
+
+    def _attend_prefill_sdpa(self, layer_idx: int, q: torch.Tensor) -> torch.Tensor:
+        """多 token prefill:gather 本页表覆盖的 KV 前缀,SDPA 因果 attention。
+
+        只 gather ``prefix_len + n_new`` 个已写入位置;页内未写槽位不会被
+        读到(cache_len 截断)。语义与 TorchStaticKV 的 prefill 分支一致
+        (is_causal + enable_gqa)。
+        """
+        cache_len = self.prefix_len + self._n_new
+        pages = self.seq.pages
+        k_gathered = self.pool.k_pages[layer_idx][pages].reshape(
+            -1, *self.pool.k_pages.shape[3:]
+        )[:cache_len]
+        v_gathered = self.pool.v_pages[layer_idx][pages].reshape(
+            -1, *self.pool.v_pages.shape[3:]
+        )[:cache_len]
+        q_t = q.transpose(0, 1).unsqueeze(0)
+        k_t = k_gathered.transpose(0, 1).unsqueeze(0)
+        v_t = v_gathered.transpose(0, 1).unsqueeze(0)
+        if self._n_new == cache_len:
+            out = F.scaled_dot_product_attention(
+                q_t, k_t, v_t, is_causal=True, enable_gqa=True
+            )
+        else:
+            q_idx = torch.arange(self._n_new, device=q.device).view(-1, 1)
+            k_idx = torch.arange(cache_len, device=q.device).view(1, -1)
+            mask = (k_idx > q_idx + cache_len - self._n_new).view(
+                1, 1, self._n_new, cache_len
+            )
+            out = F.scaled_dot_product_attention(
+                q_t, k_t, v_t, attn_mask=~mask, enable_gqa=True
+            )
+        return out.squeeze(0).transpose(0, 1)
 
     def commit(self) -> None:
         self.seq.advance(self._n_new)

@@ -289,6 +289,20 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
+22. **音频 prefill 改走 SDPA,单 chunk 处理 ~390ms→~105ms**:分阶段计时定位到
+    每个 1s 音频 chunk 的 Thinker extend prefill(仅 11 个 q token)要 ~200ms,
+    其中 sparkinfer 逐层 bind ~2.9ms×36≈105ms、run ~30ms、其余为主机侧
+    metadata。音频 chunk 是带宽受限的小负载,plan/bind 开销远超内核本身,
+    故 `SparkinferPagedKV` 的多 token prefill 改为 SDPA:把当前序列已写入的
+    页 gather 成连续缓冲(MB 级拷贝)后走 Torch SDPA 因果 attention——与
+    fp32 parity 时代验证过的内核族同源;decode 单 token 仍走 sparkinfer
+    graph replay。门禁:同 prompt 贪心 61/61 token 与纯 sparkinfer 路径完全
+    一致(prefill logits max|Δ|=0.625 为 bf16 内核族间正常漂移,argmax
+    100% 一致);prefill 计时 864→71ms(含双侧首次调用预热)。端到端
+    realtime x3:回复与信号门禁不变,chunk prefill ~68-73ms(原 185-257ms),
+    warm speak_decision→first_PCM p50 156.1ms(6 步 vocoder 时代 187.6ms)。
+    `prefill_backend="sparkinfer"` 保留旧路径供 A/B。
+
 ## Code2Wav flow-matching 步数决策(2026-08-04 人工试听确认)
 
 分阶段计时显示 `code2wav_first` 主要来自 `flow.inference_chunk` 的 flow-matching
