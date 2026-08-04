@@ -13,6 +13,27 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 区分“vLLM-omni async bridge 的同进程协议对照”和“实际 vLLM-omni runtime 基准”，
 前者不能冒充后者。
 
+## 当前验收快照与后续规划（2026-08-04）
+
+- **[事实] P1–P4 本地链路已闭环**：16kHz 输入经 fp32 Thinker、MiniCPM-o duplex
+  决策、Talker、Code2Wav、epoch-guarded L3 runtime 到 24kHz 本地 PCM；首包、信号
+  完整性、barge-in cancel-not-await、SQLite 播放事实均有回归覆盖。它不是 LiveKit/
+  物理设备端到端验收。
+- **[事实] 质量默认不让位于吞吐**：Thinker 默认 fp32/Torch-static；bf16
+  sparkinfer 长序列尚未 parity，不能成为线上质量路径。Token2Wav 每块在发布前通过
+  非有限值、削波、直流偏置和采样突变门禁。
+- **[事实] vLLM-omni 是性能参考基线**：已逐段参考其三阶段、async bridge、Stage2
+  首块预热实现；当前环境没有可运行的 `vllm`/`vllm_omni` 安装，因此还没有真实跨
+  runtime 的公平基准。bridge 协议实验不得改写为 vLLM runtime 成绩。
+- **[事实] CUDA graph 仍是隔离诊断原型**：2026-08-04 在真实权重、默认 fp32 下创建
+  graph session 失败，因本机 sparkinfer paged graph planner 不支持 `torch.float32`
+  q dtype。bf16 又未通过 Thinker 长序列 parity，故 graph 不接入默认路径，也不产生
+  性能承诺；应先补齐 fp32 kernel 支持及 token-parity 回归。
+- **[下一步，按质量优先]**：先做真实输入/物理播放的 `barge-in → 静音` trace；随后在
+  独立可审计 GPU 环境运行 vLLM-omni 与 ChanneLLM 的同权重、同 fixture、冷/热
+  p50/p95/p99 对照；最后才评估已通过 fp32 parity 的 graph/compile 优化。P5 的
+  LiveKit、真机 AEC 和远端设备播放仍是外部环境验收项。
+
 ## 已建成的组件
 
 | 层 | 组件 | 状态 |
