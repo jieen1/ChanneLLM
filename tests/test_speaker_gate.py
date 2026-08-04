@@ -84,36 +84,66 @@ def test_matching_speaker_holds_then_flushes_intact() -> None:
 
 def test_mismatched_speaker_held_then_dropped_with_rechecks() -> None:
     gate, emb = _gate(verdict=False)
-    total_frames = 40  # 4s 语音段
+    total_frames = 40  # 4s 连续语音
     for _ in range(total_frames):
         out = gate.feed(_voiced(), reply_active=True)
         assert out.size == 0  # 全程扣留,模型听不到噪声说话人
     assert gate.event == "muted" and gate.state == "muted"
     # 0.3s 首判 + 每 0.5s 复核,3.0s 到顶后不再计算:3,8,13,18,23,28,33 帧 → 7 次
     assert len(emb.calls) == 7
-    gate.feed(_silence(), reply_active=True)  # 段结束复位
+    gate.feed(_silence(n=9 * _FRAME), reply_active=True)  # 长静默结束 episode
     assert gate.state == "idle"
 
 
-def test_short_run_dropped_without_embedding_call() -> None:
+def test_short_episode_dropped_without_embedding_call() -> None:
     gate, emb = _gate()
     gate.feed(_voiced(n=_FRAME), reply_active=True)  # 0.1s < confirm
     gate.feed(_voiced(n=_FRAME), reply_active=True)  # 0.2s < confirm
     assert emb.calls == []
-    gate.feed(_silence(), reply_active=True)
+    gate.feed(_silence(n=9 * _FRAME), reply_active=True)  # episode 结束才丢弃
     assert gate.event == "dropped" and gate.state == "idle"
 
 
-def test_new_run_after_open_reverifies() -> None:
+def test_short_gap_keeps_episode_open_long_gap_rearms() -> None:
     gate, emb = _gate()
     for _ in range(3):
         gate.feed(_voiced(), reply_active=True)
     assert gate.state == "open"
-    gate.feed(_silence(), reply_active=True)
+    # 短间隙(< episode_gap 0.9s):episode 延续,保持直通
+    gate.feed(_silence(n=3 * _FRAME), reply_active=True)
+    assert gate.state == "open"
+    frame = _voiced()
+    np.testing.assert_array_equal(gate.feed(frame, reply_active=True), frame)
+    assert len(emb.calls) == 1  # 整个 episode 只验证一次
+    # 长间隙(>= episode_gap):episode 结束,新语音重新设防
+    gate.feed(_silence(n=9 * _FRAME), reply_active=True)
     assert gate.state == "idle"
-    out = gate.feed(_voiced(), reply_active=True)  # 新段:重新挂起确认
+    out = gate.feed(_voiced(), reply_active=True)
     assert out.size == 0 and gate.state == "pending"
-    assert len(emb.calls) == 1
+
+
+def test_fragmented_natural_speech_accumulates_across_runs() -> None:
+    """真实语音被 Silero 切成短 run(实测 0.2~0.6s),必须跨 run 累积验证。"""
+    gate, emb = _gate()
+    voiced_lens = (0.2, 0.6, 0.48, 0.59, 0.32)  # 秒,提问 fixture 实测分布
+    parts: list[np.ndarray] = []
+    forwarded: list[np.ndarray] = []
+    for i, secs in enumerate(voiced_lens):
+        seg = _voiced(value=0.1 + i * 0.01, n=int(secs * SAMPLING_RATE))
+        parts.append(seg)
+        out = gate.feed(seg, reply_active=True)
+        if out.size:
+            forwarded.append(out)
+        if i < len(voiced_lens) - 1:
+            gap = gate.feed(_silence(n=int(0.2 * SAMPLING_RATE)), reply_active=True)
+            assert gap.size == 0
+    total_voiced = sum(p.size for p in parts)
+    total_out = sum(f.size for f in forwarded)
+    assert gate.state == "open"
+    assert len(emb.calls) == 1  # 只验证一次,不逐 run 重复
+    # 冲刷+直通:全部 voiced 样本最终下发,一个不少
+    assert total_out == total_voiced
+    np.testing.assert_array_equal(np.concatenate(forwarded), np.concatenate(parts))
 
 
 def test_reply_deactivating_resets_gate_midrun() -> None:

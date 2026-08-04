@@ -10,12 +10,13 @@
 三者同空间。
 
 ``SpeakerGate`` 只在"模型回复播放中"门控候选语音(防环境音 barge-in 打断
-回复);空闲收听路径零额外延迟、零改动。候选语音段出现时先挂起确认
-confirm_s:此间样本**扣留不下发**(而非替换成静音,否则会切掉真实说话人
-的词头)。匹配 → 一次性冲刷全部扣留音频,话语完整、仅整体延后 confirm_s;
-不匹配 → 整段丢弃,模型时间线不消耗噪声说话人的任何样本。段内每
-recheck_s 用更长的累积音频复核,直到 max_verify_s 放弃。纯逻辑、无模型
-依赖,可单测。
+回复);空闲收听路径零额外延迟、零改动。验证单位是"语音 episode"而非
+单个 Silero run:实测自然对话被 Silero 切碎成大量 0.2~0.6s 短 run,逐 run
+验证会丢弃目标说话人的多数短语;故跨短 run 间隙累积语音,累计 confirm_s
+首次判定,通过 → 一次性冲刷全部扣留音频并直通至 episode 结束;不通过 →
+继续累积、每 recheck_s 复核至 max_verify_s;连续 episode_gap_s 无语音才
+结束 episode 重新设防。扣留期间样本不下发(不替换静音,保住词头)。
+短段分离度实测(阈值 0.35):0.3s 同人 0.510/异人 0.004,1.0s 0.720/0.057。
 """
 
 from __future__ import annotations
@@ -95,16 +96,20 @@ class VoiceprintStore:
 
 
 class SpeakerGate:
-    """声纹门状态机:``feed(frame, reply_active=...)`` → 下发音频。
+    """声纹门状态机(episode 语义):``feed(frame, reply_active=...)``。
 
     输入是 Silero 门控后的 float32 帧(非语音区间已为零),voiced 判定用
     "样本 != 0"(Silero 按 512 样本窗整窗门控,不受语音过零点影响)。
-    输出:未门控/已确认 → 原音频;挂起确认或被拒 → 空数组(样本扣留,
+    输出:未门控/已通过 → 原音频;挂起确认或被拒 → 空数组(样本扣留,
     不下发也不替换,保住真实说话人的词头);确认通过时一次性冲刷全部扣留
     音频。调用方必须容忍空输出与比输入更长的输出。
 
+    episode 生命周期:首个 voiced 样本开启;连续 episode_gap_s 无 voiced
+    结束;期间跨 Silero run 间隙持续累积验证。已通过(open)的 episode
+    剩余部分直通,不再重复验证。
+
     ``event`` 供上层读取后清零:"open"(声纹通过)/"muted"(声纹拒绝)/
-    "dropped"(短语音段未及确认即结束,丢弃)。
+    "dropped"(episode 在凑满确认窗前结束,丢弃)。
     """
 
     def __init__(
@@ -116,6 +121,7 @@ class SpeakerGate:
         confirm_s: float = 0.3,
         recheck_s: float = 0.5,
         max_verify_s: float = 3.0,
+        episode_gap_s: float = 0.9,
     ) -> None:
         self.embedder = embedder
         self.print_emb = print_embedding
@@ -123,10 +129,12 @@ class SpeakerGate:
         self._confirm_n = int(confirm_s * SAMPLING_RATE)
         self._recheck_n = int(recheck_s * SAMPLING_RATE)
         self._max_verify_n = int(max_verify_s * SAMPLING_RATE)
+        self._episode_gap_n = int(episode_gap_s * SAMPLING_RATE)
         self.event: str | None = None
         self.state = "idle"
         self._run: list[np.ndarray] = []
         self._run_n = 0
+        self._gap_n = 0  # 距上一个 voiced 样本的静默样本数
         self._next_check_n = 0
         self._exhausted = False
 
@@ -134,6 +142,7 @@ class SpeakerGate:
         self.state = "idle"
         self._run = []
         self._run_n = 0
+        self._gap_n = 0
         self._exhausted = False
 
     def feed(self, frame: np.ndarray, *, reply_active: bool) -> np.ndarray:
@@ -141,31 +150,36 @@ class SpeakerGate:
             return frame
         if not reply_active:
             if self.state != "idle":
-                self._end_run()
+                self._end_episode()
             return frame
         voiced = frame != 0.0
         if not voiced.any():
-            if self.state != "idle":
-                self._end_run()
-            return frame[:0]  # 全静音帧:本就无声,不下发
+            self._advance_gap(frame.size)
+            return frame[:0]  # 静默帧:本就无声,不下发
         change = np.flatnonzero(np.diff(voiced.astype(np.int8))) + 1
         starts = np.concatenate([[0], change])
         ends = np.concatenate([change, [frame.size]])
         parts: list[np.ndarray] = []
         for s, e in zip(starts, ends):
             if voiced[s]:
+                self._gap_n = 0
                 parts.append(self._feed_voiced(frame[s:e]))
-            elif self.state != "idle":
-                self._end_run()
+            else:
+                self._advance_gap(e - s)
         if not parts:
             return frame[:0]
         out = np.concatenate(parts)
         return out if out.size else frame[:0]
 
+    def _advance_gap(self, n: int) -> None:
+        self._gap_n += n
+        if self._gap_n >= self._episode_gap_n and self.state != "idle":
+            self._end_episode()
+
     def _feed_voiced(self, seg: np.ndarray) -> np.ndarray:
         if self.state == "open":
             return seg
-        if self.state == "idle":  # 回复播放中的新候选语音段:挂起确认
+        if self.state == "idle":  # 新 episode:挂起确认
             self.state = "pending"
             self._run, self._run_n = [], 0
             self._exhausted = False
@@ -202,10 +216,13 @@ class SpeakerGate:
         self.event = "muted"
         self._next_check_n = self._run_n + self._recheck_n
         if self._run_n >= self._max_verify_n:
-            self._exhausted = True  # 复核到顶仍不匹配,段内不再计算
+            self._exhausted = True  # 复核到顶仍不匹配,episode 内不再计算
         return None
 
-    def _end_run(self) -> None:
+    def _end_episode(self) -> None:
         if self.state == "pending" and self._run_n > 0:
-            self.event = "dropped"  # 短于确认窗的语音段无法验证,丢弃
-        self.reset()
+            self.event = "dropped"  # 凑不满确认窗的 episode 无法验证,丢弃
+        self.state = "idle"
+        self._run = []
+        self._run_n = 0
+        self._exhausted = False
