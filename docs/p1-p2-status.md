@@ -34,6 +34,11 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
   eager 35.9ms/token → graph 27.8ms/token（1.29x）。fp32 decode 是权重带宽受限
   （每 token 需流读全部 fp32 权重），故图捕获只能拿走开销部分，不是数量级加速。
   旧 bf16 sparkinfer paged 原型保留为性能诊断件。
+- **[事实] Talker 首 phrase 提前交接已落地**：官方 force_flush 的 5 帧首块语义
+  由 `push_streaming` 惰性 generator 实现,采样/RNG/KV 次序不变并由固定 seed
+  对照与契约测试锁定;短回复 fixture 收益被 Code2Wav 固定成本掩盖,长回复待量化。
+- **[事实] Code2Wav 首块 ~150ms 为 flow-matching 固定成本**：对 8/28 帧窗口近似
+  相同,降低需 n_timesteps/fp16 的质量取舍,列为待质量评审项,本轮不改动。
 - **[下一步，按质量优先]**：先做真实输入/物理播放的 `barge-in → 静音` trace；随后在
   独立可审计 GPU 环境运行 vLLM-omni 与 ChanneLLM 的同权重、同 fixture、冷/热
   p50/p95/p99 对照；性能面继续攻 fp32 权重带宽瓶颈（decode 步内核融合、以及
@@ -252,6 +257,27 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     文本一致，端到端延迟差在该 fixture 的短 unit 下不显著（p95 分别 404.8 /
     399.7ms）；收益随 unit 长度线性放大，受控证据以门禁脚本为准。
     `--no-graph-decode` 保留 eager 路径供后续 A/B。
+
+20. **Talker 首 phrase 提前交接(官方 force_flush 落地)**:`TalkerStream.push`
+    此前总生成满 25 帧才返回,使 L2 早已实现的 5 帧首块窗口一直等整段 phrase。
+    现改为 `push_streaming` 惰性 generator:回合首个 phrase 在确认越过提前阈值
+    (第 early+1 帧生成且未 EOS)时先 yield 前 early 帧,driver 逐段编排+合成,
+    尾段带 is_last 使 final 仍附在最后一个音频块。采样顺序/RNG/KV 次序不变,
+    flatten 与 push 逐位相等(固定 seed 对照),新增 4 个 streaming 契约测试。
+    短回复 fixture realtime x3:信号门禁与回复文本一致,talker_chunk_ready 收敛
+    到 129–144ms,first-PCM p95 由 405ms 收紧到 296ms;但 p50 收益被 Code2Wav
+    固定成本掩盖(见下),长回复收益待独立量化。`early_first_frames` 与
+    `codec_initial_min_audio_frames` 同源,vllm-omni 25 帧桥接模式自动关闭提前交接。
+
+## Code2Wav 首块固定成本(本轮剖析,未改动)
+
+分阶段计时(真实权重、预热后、单块)显示 `code2wav_first` 的 ~150ms 主要来自
+`flow.inference_chunk` 的 10 步 flow-matching(fp32 autocast),HiFT 与其它占比小;
+且该成本对 8 帧与 28 帧窗口近似相同(固定开销主导,非帧数主导)。参考音频
+条件(spk_emb/prompt_mels)已在 `self.cache` 一次性预编码,不是逐块重复项。
+因此 Talker 侧的任何首包优化在该 fixture 下都被这 ~150ms 下限掩盖。降低它需要
+质量取舍(减少 n_timesteps 或 fp16),均属"质量必须保证"约束下的待决策项,
+本轮不单方面执行;先记录剖析口径,待独立质量评审。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
