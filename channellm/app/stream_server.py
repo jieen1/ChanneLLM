@@ -171,11 +171,38 @@ class VoiceSession:
         self.tag = self.ingress.begin_speech("ws-session")
         self.sink.post_turn(self.tag)
 
+        # 会话级遥测:上下行样本数 + 每 chunk 决策可见性。
+        self.uplink_samples = 0
+        self.downlink_samples = 0
+        orig_publish = self.sink.publish
+
+        def counted_publish(pcm, tag):
+            self.downlink_samples += int(np.asarray(pcm).size)
+            orig_publish(pcm, tag)
+
+        self.sink.publish = counted_publish
+        orig_process = self.driver.process_audio_chunk
+
+        def logged_process(tag, pcm):
+            decision = orig_process(tag, pcm)
+            if decision is not None:
+                kind = "LISTEN" if decision.is_listen else "SPEAK"
+                print(
+                    f"[chunk] {kind} tokens={decision.n_speak_tokens} "
+                    f"embed={decision.cost_embed_ms:.0f}ms "
+                    f"decision={decision.cost_decision_ms:.0f}ms",
+                    flush=True,
+                )
+            return decision
+
+        self.driver.process_audio_chunk = logged_process
+
     def feed_pcm16(self, payload: bytes) -> int:
         """提交一个上行 PCM16 帧,返回凑满并进入 GPU 队列的完整 unit 数。"""
         if len(payload) < 2:
             return 0
         i16 = np.frombuffer(payload, dtype=np.int16)
+        self.uplink_samples += i16.size
         return int(self.ingress.push_frame(i16, sample_rate=INPUT_SAMPLE_RATE))
 
     def mark_eou(self) -> None:
@@ -188,6 +215,11 @@ class VoiceSession:
         会在多会话下累积并污染后续 capture(实测第 8 会话 capture 失效)。
         """
         self.queued.close(timeout_s=timeout_s)
+        print(
+            f"[session] summary: uplink={self.uplink_samples / INPUT_SAMPLE_RATE:.1f}s "
+            f"downlink={self.downlink_samples / OUTPUT_SAMPLE_RATE:.1f}s",
+            flush=True,
+        )
         try:
             self.models.pool.free_seq(self.session.kv.seq)
         except Exception:  # 释放失败不应掩盖断连清理

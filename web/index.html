@@ -96,6 +96,12 @@ async function start() {
     log("当前浏览器不支持 AudioWorklet。", "ev-warn");
     return;
   }
+  // iOS/Safari 的 AudioContext 即使在手势中创建也可能 suspended,必须显式
+  // resume,否则 worklet 永不调度、收到音频也无声。
+  if (audioCtx.state === "suspended") {
+    await audioCtx.resume();
+  }
+  log(`AudioContext ${audioCtx.state} @${audioCtx.sampleRate}Hz`, "ev-info");
   await audioCtx.audioWorklet.addModule("audio-worklet.js");
 
   playbackNode = new AudioWorkletNode(audioCtx, "playback-processor");
@@ -162,6 +168,7 @@ async function start() {
     const view = new DataView(e.data);
     const epoch = view.getUint16(0, true);
     if (epoch < maxEpoch) return;
+    if (recvSamples === 0) log("收到首个回复音频,开始播放", "ev-ok");
     maxEpoch = epoch;
     const buf = e.data.slice(2);
     playbackNode.port.postMessage({ type: "push", buf }, [buf]);
