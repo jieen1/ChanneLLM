@@ -83,7 +83,7 @@ def test_matching_speaker_holds_then_flushes_intact() -> None:
 
 
 def test_mismatched_speaker_held_then_dropped_with_rechecks() -> None:
-    gate, emb = _gate(verdict=False)
+    gate, emb = _gate(verdict=False, fallback_open_s=999.0)
     total_frames = 40  # 4s 连续语音
     for _ in range(total_frames):
         out = gate.feed(_voiced(), reply_active=True)
@@ -176,13 +176,17 @@ def test_store_save_load_clear_roundtrip(tmp_path: Path) -> None:
     emb = FakeEmbedder()
     store = VoiceprintStore(path, emb)
     assert store.embedding is None
+    assert store.threshold == VoiceprintStore.DEFAULT_THRESHOLD
     vec = np.array([3.0, 4.0, 0.0, 0.0], dtype=np.float32)
-    store.save(vec)
+    store.save(vec, threshold=0.22, self_sim=0.47)
     np.testing.assert_allclose(store.embedding, vec / 5.0, atol=1e-6)
     reloaded = VoiceprintStore(path, emb)
     np.testing.assert_allclose(reloaded.embedding, store.embedding, atol=1e-6)
+    assert reloaded.threshold == pytest.approx(0.22, abs=1e-3)
+    assert reloaded.self_sim == pytest.approx(0.47, abs=1e-3)
     reloaded.clear()
-    assert reloaded.embedding is None and not path.is_file()
+    assert reloaded.embedding is None
+    assert not path.with_suffix(".npz").is_file()
 
 
 def _stub_embedder(results: list[np.ndarray | None]) -> SpeakerEmbedder:
@@ -283,3 +287,13 @@ def test_gate_survives_pcm16_quantization_holes() -> None:
     out = gate.feed(seg, reply_active=True)
     assert gate.state == "open" and gate.event == "open"
     assert out.size == seg.size  # 冲刷全部
+
+
+def test_fallback_opens_long_rejected_episode() -> None:
+    """被拒 episode 累积满 fallback_open_s 无条件放行(防阈值失准静音主人)。"""
+    gate, emb = _gate(verdict=False, fallback_open_s=1.8)
+    forwarded = 0
+    for _ in range(20):  # 2s 连续语音
+        forwarded += gate.feed(_voiced(), reply_active=True).size
+    assert gate.event in ("open", "fallback") and gate.state == "open"
+    assert forwarded == int(2.0 * SAMPLING_RATE)  # 全部扣留音频冲刷

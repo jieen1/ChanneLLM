@@ -100,23 +100,47 @@ class SpeakerEmbedder:
 
 
 class VoiceprintStore:
-    """声纹持久化:单个 L2 归一化嵌入,存 ``.npy``。"""
+    """声纹持久化:嵌入 + 按注册环境校准的阈值,存 ``.npz``。
+
+    全局固定阈值在实机不可靠:注册时安静、barge-in 时回声消除在削波,
+    同人相似度会显著下移。注册时把注册音频对半分求同人相似度 self_sim,
+    阈值取 self_sim-0.25(夹在 [0.15, 0.35]),与当前麦克风/环境同口径。
+    兼容旧 ``.npy``(无阈值 → 默认 0.35)。
+    """
+
+    DEFAULT_THRESHOLD = 0.35
 
     def __init__(self, path: str | Path, embedder: SpeakerEmbedder) -> None:
         self.path = Path(path)
         self.embedder = embedder
         self.embedding: np.ndarray | None = None
-        if self.path.is_file():
+        self.threshold = self.DEFAULT_THRESHOLD
+        self.self_sim: float | None = None
+        npz = self.path.with_suffix(".npz")
+        if npz.is_file():
+            data = np.load(npz)
+            self.embedding = _normalize(data["embedding"])
+            self.threshold = float(data["threshold"])
+            self.self_sim = float(data["self_sim"]) if "self_sim" in data else None
+        elif self.path.is_file():
             self.embedding = _normalize(np.load(self.path))
 
-    def save(self, embedding: np.ndarray) -> None:
+    def save(self, embedding: np.ndarray, threshold: float, self_sim: float) -> None:
         self.embedding = _normalize(embedding)
-        np.save(self.path, self.embedding)
+        self.threshold = float(threshold)
+        self.self_sim = float(self_sim)
+        np.savez(
+            self.path.with_suffix(".npz"),
+            embedding=self.embedding,
+            threshold=np.float32(self.threshold),
+            self_sim=np.float32(self.self_sim),
+        )
 
     def clear(self) -> None:
         self.embedding = None
-        if self.path.is_file():
-            self.path.unlink()
+        for f in (self.path, self.path.with_suffix(".npz")):
+            if f.is_file():
+                f.unlink()
 
 
 class SpeakerGate:
@@ -146,6 +170,7 @@ class SpeakerGate:
         recheck_s: float = 0.5,
         max_verify_s: float = 3.0,
         episode_gap_s: float = 0.9,
+        fallback_open_s: float = 1.8,
     ) -> None:
         self.embedder = embedder
         self.print_emb = print_embedding
@@ -154,7 +179,9 @@ class SpeakerGate:
         self._recheck_n = int(recheck_s * SAMPLING_RATE)
         self._max_verify_n = int(max_verify_s * SAMPLING_RATE)
         self._episode_gap_n = int(episode_gap_s * SAMPLING_RATE)
+        self._fallback_n = int(fallback_open_s * SAMPLING_RATE)
         self.event: str | None = None
+        self.last_sim: float | None = None
         self.state = "idle"
         self._run: list[np.ndarray] = []
         self._run_n = 0
@@ -224,17 +251,26 @@ class SpeakerGate:
         return seg[:0]  # 扣留:不下发
 
     def _decide(self) -> np.ndarray | None:
-        """对整段累积语音做声纹判定;通过返回全部扣留音频,否则返回 None。"""
+        """对整段累积语音做声纹判定;通过返回全部扣留音频,否则返回 None。
+
+        兜底:被拒 episode 累积满 fallback_open_s 连续语音后无条件放行——
+        声纹阈值失准时宁可由环境音打断,也绝不能把注册人自己长时间静音
+        (实机即发生过:回声消除削波使同人相似度跌破阈值,用户无法插话)。
+
+        _run 在整个 episode 内不清空:pending/muted 阶段样本全部扣留未下发,
+        任何时刻开门(匹配或兜底)都冲刷整段,被拒阶段的历史音频不丢。
+        """
         full = np.concatenate(self._run)
-        self._run = []
         emb = self.embedder.embedding(full)
-        matched = (
-            emb is not None
-            and float(np.dot(emb, self.print_emb)) >= self.threshold  # type: ignore[arg-type]
-        )
-        if matched:
-            self.state = "open"
-            self.event = "open"
+        sim = float(np.dot(emb, self.print_emb)) if emb is not None else None  # type: ignore[arg-type]
+        self.last_sim = sim
+        if sim is not None and sim >= self.threshold:
+            self.state, self.event = "open", "open"
+            self._run = []
+            return full
+        if self._run_n >= self._fallback_n:
+            self.state, self.event = "open", "fallback"
+            self._run = []
             return full
         self.state = "muted"
         self.event = "muted"

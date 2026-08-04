@@ -170,7 +170,10 @@ async def main() -> int:
 
         campplus = models.model_dir / "assets" / "token2wav" / "campplus.onnx"
         voiceprint = VoiceprintStore(VOICEPRINT_PATH, SpeakerEmbedder(campplus))
-        print(f"[load] 声纹就绪 enrolled={voiceprint.embedding is not None}", flush=True)
+        print(
+            f"[load] 声纹就绪 enrolled={voiceprint.embedding is not None} "
+            f"threshold={voiceprint.threshold:.2f}", flush=True,
+        )
     except Exception as exc:  # noqa: BLE001 - 声纹是增强项,不可用不能拖垮服务
         print(f"[load] 声纹不可用(降级无声纹门): {exc!r}", flush=True)
 

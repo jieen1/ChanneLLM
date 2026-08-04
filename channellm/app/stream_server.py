@@ -218,7 +218,7 @@ class VoiceSession:
             self._speaker_gate = SpeakerGate(
                 voiceprint.embedder,
                 voiceprint.embedding,
-                threshold=VOICEPRINT_THRESHOLD,
+                threshold=voiceprint.threshold,
                 confirm_s=VOICEPRINT_CONFIRM_S,
             )
         self._enrolling = False
@@ -394,13 +394,19 @@ class VoiceSession:
         out = gate.feed(gated, reply_active=self._reply_active())
         event, gate.event = gate.event, None
         if event is not None:
+            sim = gate.last_sim
+            sim_txt = f" sim={sim:.3f}" if sim is not None else ""
             labels = {
                 "open": "声纹确认,放行",
                 "muted": "声纹不符,已拦截",
                 "dropped": "短语音未及确认,丢弃",
+                "fallback": "长语音兜底,放行",
             }
-            print(f"[voiceprint] {labels.get(event, event)}", flush=True)
-            self.sink.post_control({"type": "gate", "state": event})
+            print(
+                f"[voiceprint] {labels.get(event, event)}{sim_txt} "
+                f"(阈值 {gate.threshold:.2f})", flush=True,
+            )
+            self.sink.post_control({"type": "gate", "state": event, "sim": sim})
         return out
 
     def enroll_start(self) -> None:
@@ -460,11 +466,29 @@ class VoiceSession:
             self.sink.post_control({"type": "enroll_failed", "reason": "no_valid_segment"})
             print("[voiceprint] 注册失败:无有效语音段", flush=True)
             return
-        self._voiceprint.save(emb)
+        # 阈值校准:注册音频对半分,同人同麦克风同环境的相似度 self_sim 是
+        # 该设备的相似度上界;barge-in 时回声消除削波会使其下移,取
+        # self_sim-0.25(夹在 [0.15,0.35])作阈值,替代全局魔数。
+        half = len(full) // 2
+        e1 = self._voiceprint.embedder.embedding(full[:half])
+        e2 = self._voiceprint.embedder.embedding(full[half:])
+        if e1 is not None and e2 is not None:
+            self_sim = float(np.dot(e1, e2))
+            threshold = float(np.clip(self_sim - 0.25, 0.15, 0.35))
+        else:
+            self_sim, threshold = float("nan"), VOICEPRINT_THRESHOLD
+        self._voiceprint.save(emb, threshold, self_sim)
         if self._speaker_gate is not None:
             self._speaker_gate.print_emb = emb
-        self.sink.post_control({"type": "enrolled", "voiced_s": round(voiced_s, 2)})
-        print(f"[voiceprint] 注册完成({voiced_s:.1f}s 语音)→ {VOICEPRINT_PATH.name}", flush=True)
+            self._speaker_gate.threshold = threshold
+        self.sink.post_control(
+            {"type": "enrolled", "voiced_s": round(voiced_s, 2),
+             "self_sim": round(self_sim, 3), "threshold": round(threshold, 3)}
+        )
+        print(
+            f"[voiceprint] 注册完成({voiced_s:.1f}s)self_sim={self_sim:.3f} "
+            f"→ 阈值 {threshold:.2f}", flush=True,
+        )
 
     def mark_eou(self) -> None:
         self.queued.on_eou(self.tag)
