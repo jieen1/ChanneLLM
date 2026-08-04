@@ -1,8 +1,8 @@
 /* ChanneLLM web 客户端音频处理器:
- * - capture-processor: 麦克风(context 采样率) → 线性重采样 16kHz → Int16 帧上传
+ * - capture-processor: 麦克风(context 采样率) → 线性重采样 16kHz → Int16 帧上传,
+ *   并周期性上报输入电平(供 UI 显示麦克风采样)
  * - playback-processor: 24kHz Int16 下行帧 → 环形缓冲(60ms 起播门限) →
  *   线性重采样到 context 采样率输出
- * MVP 用线性插值重采样;产品化可换更高质量核。
  */
 
 class CaptureProcessor extends AudioWorkletProcessor {
@@ -11,6 +11,8 @@ class CaptureProcessor extends AudioWorkletProcessor {
     this.ratio = sampleRate / 16000;
     this.buf = [];
     this.pos = 0.0;
+    this.levelCounter = 0;
+    this.peak = 0;
   }
 
   process(inputs) {
@@ -20,7 +22,10 @@ class CaptureProcessor extends AudioWorkletProcessor {
     }
     const ch = input[0];
     for (let i = 0; i < ch.length; i++) {
-      this.buf.push(ch[i]);
+      const v = ch[i];
+      const a = v < 0 ? -v : v;
+      if (a > this.peak) this.peak = a;
+      this.buf.push(v);
     }
     const out = [];
     while (this.pos + 1 < this.buf.length) {
@@ -40,7 +45,14 @@ class CaptureProcessor extends AudioWorkletProcessor {
         const s = Math.max(-1, Math.min(1, out[i]));
         i16[i] = s < 0 ? Math.round(s * 32768) : Math.round(s * 32767);
       }
-      this.port.postMessage(i16.buffer, [i16.buffer]);
+      this.port.postMessage({ type: "pcm", buf: i16.buffer }, [i16.buffer]);
+    }
+    // ~每 100ms 上报一次电平
+    this.levelCounter += ch.length;
+    if (this.levelCounter >= sampleRate * 0.1) {
+      this.port.postMessage({ type: "level", value: this.peak });
+      this.levelCounter = 0;
+      this.peak = 0;
     }
     return true;
   }
@@ -49,15 +61,15 @@ class CaptureProcessor extends AudioWorkletProcessor {
 class PlaybackProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    // 24kHz 源 → context 采样率的步进
     this.ratio = 24000 / sampleRate;
-    this.cap = 24000 * 15; // 15s 环形缓冲
+    this.cap = 24000 * 15;
     this.ring = new Float32Array(this.cap);
     this.w = 0;
     this.r = 0;
     this.count = 0;
-    this.startThreshold = Math.floor(24000 * 0.06); // 60ms 起播门限
+    this.startThreshold = Math.floor(24000 * 0.06);
     this.playing = false;
+    this.reportCounter = 0;
     this.port.onmessage = (e) => {
       const d = e.data;
       if (d.type === "clear") {
@@ -88,25 +100,38 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     if (!out) {
       return true;
     }
+    let level = 0;
     if (!this.playing) {
       out.fill(0);
-      return true;
+    } else {
+      for (let i = 0; i < out.length; i++) {
+        if (this.count <= 0) {
+          out[i] = 0;
+          continue;
+        }
+        const i0 = Math.floor(this.r);
+        const frac = this.r - i0;
+        const a = this.ring[i0 % this.cap];
+        const b = this.ring[(i0 + 1) % this.cap];
+        out[i] = a * (1 - frac) + b * frac;
+        const av = out[i] < 0 ? -out[i] : out[i];
+        if (av > level) level = av;
+        this.r += this.ratio;
+        if (this.r >= this.cap) {
+          this.r -= this.cap;
+        }
+        this.count -= this.ratio;
+      }
     }
-    for (let i = 0; i < out.length; i++) {
-      if (this.count <= 0) {
-        out[i] = 0;
-        continue;
-      }
-      const i0 = Math.floor(this.r);
-      const frac = this.r - i0;
-      const a = this.ring[i0 % this.cap];
-      const b = this.ring[(i0 + 1) % this.cap];
-      out[i] = a * (1 - frac) + b * frac;
-      this.r += this.ratio;
-      if (this.r >= this.cap) {
-        this.r -= this.cap;
-      }
-      this.count -= this.ratio;
+    this.reportCounter += out.length;
+    if (this.reportCounter >= sampleRate * 0.1) {
+      this.port.postMessage({
+        type: "state",
+        playing: this.playing,
+        bufferedMs: Math.round(this.count / 24),
+        level,
+      });
+      this.reportCounter = 0;
     }
     return true;
   }

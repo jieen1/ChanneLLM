@@ -31,6 +31,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--web-dir", type=Path, default=WEB_DIR, help="web 客户端静态文件目录"
     )
+    parser.add_argument("--ssl-cert", type=Path, default=REPO_ROOT / "certs/server.crt")
+    parser.add_argument("--ssl-key", type=Path, default=REPO_ROOT / "certs/server.key")
+    parser.add_argument(
+        "--no-tls", action="store_true",
+        help="禁用 TLS(仅本机调试;麦克风/AudioWorklet 需要安全上下文)",
+    )
     return parser
 
 
@@ -117,6 +123,21 @@ def load_models(device: str = "cuda"):
     return models
 
 
+def start_ca_server(port: int, certs_dir: Path) -> None:
+    """明纹 HTTP 端口只发布 CA 证书,供手机下载安装(证书本身可明文传输)。"""
+    import functools
+    import http.server
+    import threading
+
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler, directory=str(certs_dir)
+    )
+    httpd = http.server.ThreadingHTTPServer(("0.0.0.0", port), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    print(f"[serve] CA 证书下载: http://<host>:{port}/ca.crt", flush=True)
+
+
 _STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -130,6 +151,8 @@ _STATIC_TYPES = {
 async def main() -> int:
     args = build_arg_parser().parse_args()
 
+    import ssl as ssl_mod
+
     from websockets.asyncio.server import serve
     from websockets.datastructures import Headers
     from websockets.http11 import Response
@@ -137,6 +160,18 @@ async def main() -> int:
     from channellm.app.stream_server import VoiceSession
 
     models = load_models()
+
+    ssl_ctx = None
+    if not args.no_tls:
+        if not (args.ssl_cert.is_file() and args.ssl_key.is_file()):
+            print(
+                f"[serve] 缺少证书 {args.ssl_cert} / {args.ssl_key};用 --no-tls 可退回 "
+                "HTTP(手机浏览器将无法使用麦克风)", flush=True,
+            )
+        else:
+            ssl_ctx = ssl_mod.SSLContext(ssl_mod.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(str(args.ssl_cert), str(args.ssl_key))
+            start_ca_server(args.port + 1, REPO_ROOT / "certs")
 
     state = {"busy": False}
 
@@ -169,6 +204,7 @@ async def main() -> int:
         session: VoiceSession | None = None
         try:
             session = VoiceSession(models)
+            print("[session] opened", flush=True)
             send_task = asyncio.create_task(sender(ws, session))
             try:
                 async for message in ws:
@@ -216,11 +252,15 @@ async def main() -> int:
             )
         return Response(404, "Not Found", Headers([("Content-Length", "0")]), b"")
 
+    scheme = "https" if ssl_ctx else "http"
     print(
-        f"[serve] http://{args.host}:{args.port} (web 客户端) | ws://{args.host}:{args.port}/ws",
+        f"[serve] {scheme}://{args.host}:{args.port} (web 客户端) | "
+        f"{'wss' if ssl_ctx else 'ws'}://{args.host}:{args.port}/ws",
         flush=True,
     )
-    async with serve(handler, args.host, args.port, process_request=process_request):
+    async with serve(
+        handler, args.host, args.port, process_request=process_request, ssl=ssl_ctx
+    ):
         await asyncio.get_running_loop().create_future()
     return 0
 

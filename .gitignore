@@ -44,3 +44,4 @@ traces/
 
 # Kernel JIT caches (sparkinfer / cutlass-dsl)
 .cutlass_cache/
+certs/
