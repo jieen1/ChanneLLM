@@ -42,6 +42,11 @@
 <h1>ChanneLLM 全双工语音</h1>
 <div class="state"><span id="dot" class="dot"></span><span id="state-text">未连接</span></div>
 <button id="toggle">开始对话</button>
+<div id="vp-row" style="display:none;width:100%;align-items:center;justify-content:center;gap:10px;
+     background:#161b22;border-radius:12px;padding:8px 12px">
+  <span id="vp-status" style="font-size:13px;color:#8b949e"></span>
+  <button id="enroll-btn" style="font-size:13px;padding:6px 16px;border-radius:16px;background:#238636">录入声纹</button>
+</div>
 <div id="reply">（回复文本显示在这里）</div>
 <div class="bars">
   <div class="bar-row"><span class="bar-label">麦克风</span>
@@ -68,13 +73,15 @@ const $ = (id) => document.getElementById(id);
 const toggleBtn = $("toggle"), dotEl = $("dot"), stateTextEl = $("state-text");
 const replyEl = $("reply"), upEl = $("up"), downEl = $("down"), epochEl = $("epoch");
 const micFill = $("mic-fill"), playFill = $("play-fill"), bufMs = $("buf-ms"), logEl = $("log");
+const vpRow = $("vp-row"), vpStatus = $("vp-status"), enrollBtn = $("enroll-btn");
+let enrolling = false, enrollTimer = null;
 
 let ws = null, audioCtx = null, micStream = null, captureNode = null, micSource = null;
 let playbackNode = null, running = false, maxEpoch = -1, sentSamples = 0, recvSamples = 0;
 // 端到端延迟测量:电平 VAD 判定话音结束 → 首个回复音频到达
 let voiced = false, silenceStart = null, lastVoicedAt = null, voiceEndAt = null;
 let e2ePending = false, latencies = [];
-const VOICE_ON = 0.02, VOICE_OFF_MS = 700;
+const VOICE_ON = 0.03, VOICE_OFF_MS = 700;
 const latencyCard = $("latency-card"), latencyEl = $("latency"), latencyHist = $("latency-hist");
 
 function log(text, cls) {
@@ -88,6 +95,22 @@ function setState(kind, text) {
   dotEl.className = "dot " + kind;
   stateTextEl.textContent = text;
 }
+
+function setEnrollUI(active, statusText) {
+  enrolling = active;
+  enrollBtn.textContent = active ? "完成录入" : "录入声纹";
+  enrollBtn.style.background = active ? "#9e6a03" : "#238636";
+  if (statusText) vpStatus.textContent = statusText;
+  if (enrollTimer) { clearTimeout(enrollTimer); enrollTimer = null; }
+  if (active) enrollTimer = setTimeout(() => {
+    if (enrolling && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "enroll_end" }));
+  }, 10000);
+}
+enrollBtn.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: enrolling ? "enroll_end" : "enroll_start" }));
+  if (!enrolling) setEnrollUI(true, "录入中…请持续说话(≥3 秒)");
+});
 
 async function start() {
   if (!window.isSecureContext) {
@@ -128,8 +151,10 @@ async function start() {
 
   setState("connecting", "请求麦克风权限…");
   log("请求麦克风权限 …", "ev-info");
+  // autoGainControl 关闭:自动增益会把很轻的环境音放大到被误判为说话。
+  // 保留回声消除与降噪;人声偏小可靠近麦克风或调高说话音量。
   micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
   });
   log("麦克风已开启", "ev-ok");
   micSource = audioCtx.createMediaStreamSource(micStream);
@@ -189,6 +214,23 @@ async function start() {
       } else if (msg.type === "reply") {
         replyEl.textContent = msg.text || "";
         log(`回复文本: ${msg.text}`, "ev-ok");
+      } else if (msg.type === "voiceprint") {
+        vpRow.style.display = "flex";
+        vpStatus.textContent = msg.enrolled ? "声纹已录入 ✓(环境音将被过滤)" : "未录入声纹(环境音可能打断回复)";
+        log(msg.enrolled ? "声纹已加载" : "声纹未录入,可点击『录入声纹』", "ev-info");
+      } else if (msg.type === "enroll_started") {
+        setEnrollUI(true, "录入中…请持续说话(≥3 秒)");
+      } else if (msg.type === "enrolled") {
+        setEnrollUI(false, "声纹已录入 ✓(环境音将被过滤)");
+        log(`声纹录入完成(${msg.voiced_s}s 有效语音)`, "ev-ok");
+      } else if (msg.type === "enroll_failed") {
+        setEnrollUI(false, msg.reason === "too_short"
+          ? `录入失败:有效语音仅 ${msg.voiced_s}s,请重录(≥1.5s)` : "录入失败,请重试");
+        log(`声纹录入失败: ${msg.reason}`, "ev-warn");
+      } else if (msg.type === "gate") {
+        const label = { open: "声纹确认,放行你的语音", muted: "声纹过滤:环境音被拦截",
+                        dropped: "短促声音未及确认,已忽略" }[msg.state] || msg.state;
+        log(label, msg.state === "muted" ? "ev-warn" : "ev-info");
       }
       return;
     }
@@ -215,6 +257,8 @@ async function start() {
 
 function stop(fromServer) {
   running = false;
+  if (enrollTimer) { clearTimeout(enrollTimer); enrollTimer = null; }
+  enrolling = false;
   if (captureNode) { captureNode.disconnect(); captureNode.port.close(); captureNode = null; }
   if (micSource) { micSource.disconnect(); micSource = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }

@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import struct
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -41,6 +42,16 @@ _EPOCH_STRUCT = struct.Struct("<H")
 # (OpenAI Realtime server_vad 默认 silence 500ms)。
 VAD_VOICE_RMS = 0.008
 VAD_SILENCE_MS = 450
+
+# 声纹门:只在模型回复播放中门控候选语音,防环境音 barge-in 打断回复。
+# 阈值来自实测分离度(campplus 同人不同段 ~0.6,人声 vs 噪声 ~0.05)。
+VOICEPRINT_THRESHOLD = 0.35
+VOICEPRINT_CONFIRM_S = 0.3     # 候选语音段挂起确认窗
+VOICEPRINT_MIN_ENROLL_S = 1.5  # 注册最少有效语音
+VOICEPRINT_MAX_ENROLL_S = 12.0  # 注册采集上限(防无界缓冲)
+VOICEPRINT_PATH = Path(__file__).resolve().parents[2] / "voiceprint.npy"
+# 回复"仍在播放"的判定:出站队列非空,或距最后一次音频发布不超过该尾窗。
+_REPLY_ACTIVE_TAIL_S = 1.0
 
 
 def pcm16_to_float32(payload: bytes) -> np.ndarray:
@@ -102,6 +113,17 @@ class StreamingPlaybackSink:
             self._items.append(OutboundItem("clear"))
         self._wake()
 
+    @property
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def post_control(self, meta: dict[str, Any]) -> None:
+        """JSON 控制消息统一走入站队列(与音频同序,避免并发 send)。"""
+        with self._lock:
+            self._items.append(OutboundItem("control", meta=meta))
+        self._wake()
+
     def post_turn(self, tag: EpochTag) -> None:
         with self._lock:
             self._items.append(OutboundItem("turn", tag.turn_epoch & 0xFFFF))
@@ -122,7 +144,7 @@ class StreamingPlaybackSink:
 class VoiceSession:
     """单个 WebSocket 连接的 duplex 会话(模型共享,状态独立)。"""
 
-    def __init__(self, models: Any) -> None:
+    def __init__(self, models: Any, voiceprint: Any = None) -> None:
         from channellm.duplex.driver import DuplexPipelineDriver
         from channellm.duplex.ingress import PcmIngress
         from channellm.duplex.queued_runtime import QueuedDuplexRuntime
@@ -184,6 +206,23 @@ class VoiceSession:
         self._vad_voiced = False
         self._vad_silent_samples = 0
         self._gate_speaking = False
+        self._last_publish_t: float | None = None
+        # 声纹门:仅在模型回复播放中过滤非目标说话人,空闲收听零额外延迟。
+        self._voiceprint = voiceprint
+        self._speaker_gate = None
+        if voiceprint is not None:
+            from channellm.audio.speaker import SpeakerGate
+
+            self._speaker_gate = SpeakerGate(
+                voiceprint.embedder,
+                voiceprint.embedding,
+                threshold=VOICEPRINT_THRESHOLD,
+                confirm_s=VOICEPRINT_CONFIRM_S,
+            )
+        self._enrolling = False
+        self._enroll_runs: list[np.ndarray] = []
+        self._enroll_run_parts: list[np.ndarray] = []
+        self._enroll_voiced_n = 0
         # Silero VAD 噪声门:加载失败自动降级能量阈值,不阻塞会话。
         try:
             from channellm.audio.vad import VoiceGate
@@ -199,6 +238,7 @@ class VoiceSession:
 
         def counted_publish(pcm, tag):
             self.downlink_samples += int(np.asarray(pcm).size)
+            self._last_publish_t = time.monotonic()
             orig_publish(pcm, tag)
 
         self.sink.publish = counted_publish
@@ -247,6 +287,9 @@ class VoiceSession:
                 self._voice_gate.speech_ended = False
                 if self.ingress.flush_partial():
                     print("[vad] Silero 话音结束,提前冲刷半块", flush=True)
+            gated = self._apply_voiceprint(gated)
+            if gated.size == 0:
+                return 0  # 声纹门扣留/拦截:不下发
             return int(self.ingress.push_frame(gated, sample_rate=INPUT_SAMPLE_RATE))
         self._vad_feed(i16)  # Silero 不可用时的能量阈值降级
         return int(self.ingress.push_frame(wave, sample_rate=INPUT_SAMPLE_RATE))
@@ -272,6 +315,88 @@ class VoiceSession:
                     f"(silence>={VAD_SILENCE_MS}ms)",
                     flush=True,
                 )
+
+    def _reply_active(self) -> bool:
+        """回复音频仍在出站/播放中(声纹门只在此期间工作)。"""
+        if self.sink.pending_count > 0:
+            return True
+        last = self._last_publish_t
+        return last is not None and (time.monotonic() - last) < _REPLY_ACTIVE_TAIL_S
+
+    def _apply_voiceprint(self, gated: np.ndarray) -> np.ndarray:
+        if self._enrolling:
+            self._enroll_collect(gated)
+            return gated[:0]  # 注册期间音频不下发,模型保持安静
+        gate = self._speaker_gate
+        if gate is None or gate.print_emb is None:
+            return gated
+        out = gate.feed(gated, reply_active=self._reply_active())
+        event, gate.event = gate.event, None
+        if event is not None:
+            labels = {
+                "open": "声纹确认,放行",
+                "muted": "声纹不符,已拦截",
+                "dropped": "短语音未及确认,丢弃",
+            }
+            print(f"[voiceprint] {labels.get(event, event)}", flush=True)
+            self.sink.post_control({"type": "gate", "state": event})
+        return out
+
+    def enroll_start(self) -> None:
+        if self._voiceprint is None:
+            self.sink.post_control({"type": "enroll_failed", "reason": "embedder_unavailable"})
+            return
+        self._enrolling = True
+        self._enroll_runs = []
+        self._enroll_run_parts = []
+        self._enroll_voiced_n = 0
+        self.sink.post_control({"type": "enroll_started"})
+        print("[voiceprint] 注册开始", flush=True)
+
+    def _enroll_collect(self, gated: np.ndarray) -> None:
+        voiced = gated != 0.0
+        if not voiced.any():
+            self._enroll_close_run()
+            return
+        change = np.flatnonzero(np.diff(voiced.astype(np.int8))) + 1
+        starts = np.concatenate([[0], change])
+        ends = np.concatenate([change, [gated.size]])
+        cap = int(VOICEPRINT_MAX_ENROLL_S * INPUT_SAMPLE_RATE)
+        for s, e in zip(starts, ends):
+            if voiced[s]:
+                if self._enroll_voiced_n + (e - s) <= cap:
+                    self._enroll_run_parts.append(gated[s:e])
+                    self._enroll_voiced_n += e - s
+            else:
+                self._enroll_close_run()
+
+    def _enroll_close_run(self) -> None:
+        if self._enroll_run_parts:
+            self._enroll_runs.append(np.concatenate(self._enroll_run_parts))
+            self._enroll_run_parts = []
+
+    def enroll_end(self) -> None:
+        if not self._enrolling:
+            return
+        self._enrolling = False
+        self._enroll_close_run()
+        voiced_s = self._enroll_voiced_n / INPUT_SAMPLE_RATE
+        if voiced_s < VOICEPRINT_MIN_ENROLL_S:
+            self.sink.post_control(
+                {"type": "enroll_failed", "reason": "too_short", "voiced_s": round(voiced_s, 2)}
+            )
+            print(f"[voiceprint] 注册失败:有效语音仅 {voiced_s:.1f}s", flush=True)
+            return
+        emb = self._voiceprint.embedder.embed_average(self._enroll_runs)
+        if emb is None:
+            self.sink.post_control({"type": "enroll_failed", "reason": "no_valid_segment"})
+            print("[voiceprint] 注册失败:无有效语音段", flush=True)
+            return
+        self._voiceprint.save(emb)
+        if self._speaker_gate is not None:
+            self._speaker_gate.print_emb = emb
+        self.sink.post_control({"type": "enrolled", "voiced_s": round(voiced_s, 2)})
+        print(f"[voiceprint] 注册完成({voiced_s:.1f}s 语音)→ {VOICEPRINT_PATH.name}", flush=True)
 
     def mark_eou(self) -> None:
         self.queued.on_eou(self.tag)

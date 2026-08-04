@@ -73,3 +73,22 @@ def test_epoch_framing_little_endian() -> None:
     frame = epoch.to_bytes(2, "little") + float32_to_pcm16(np.zeros(8, dtype=np.float32))
     assert frame[0] == 0x34 and frame[1] == 0x12
     assert len(frame) == 2 + 8 * 2
+
+
+def test_sink_post_control_orders_with_audio() -> None:
+    sink = StreamingPlaybackSink()
+    sink.post_control({"type": "voiceprint", "enrolled": True})
+    sink.publish(np.zeros(16, dtype=np.float32), EpochTag(turn_epoch=1))
+    items = sink.drain()
+    assert [item.kind for item in items] == ["control", "audio"]
+    assert items[0].meta == {"type": "voiceprint", "enrolled": True}
+
+
+def test_sink_pending_count_tracks_queue() -> None:
+    sink = StreamingPlaybackSink()
+    assert sink.pending_count == 0
+    sink.publish(np.zeros(16, dtype=np.float32), EpochTag(turn_epoch=1))
+    sink.post_control({"type": "gate", "state": "open"})
+    assert sink.pending_count == 2
+    sink.drain()
+    assert sink.pending_count == 0

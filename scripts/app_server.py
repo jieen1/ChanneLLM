@@ -120,6 +120,7 @@ def load_models(device: str = "cuda"):
     models.pool = pool
     models.attn = attn
     models.make_thinker_kv = lambda: SparkinferPagedKV(pool, attn)
+    models.model_dir = model_dir
     return models
 
 
@@ -161,6 +162,18 @@ async def main() -> int:
 
     models = load_models()
 
+    # 声纹:复用 Code2Wav 的 campplus 说话人模型;加载失败降级为无声纹门。
+    voiceprint = None
+    try:
+        from channellm.app.stream_server import VOICEPRINT_PATH
+        from channellm.audio.speaker import SpeakerEmbedder, VoiceprintStore
+
+        campplus = models.model_dir / "assets" / "token2wav" / "campplus.onnx"
+        voiceprint = VoiceprintStore(VOICEPRINT_PATH, SpeakerEmbedder(campplus))
+        print(f"[load] 声纹就绪 enrolled={voiceprint.embedding is not None}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - 声纹是增强项,不可用不能拖垮服务
+        print(f"[load] 声纹不可用(降级无声纹门): {exc!r}", flush=True)
+
     ssl_ctx = None
     if not args.no_tls:
         if not (args.ssl_cert.is_file() and args.ssl_key.is_file()):
@@ -192,6 +205,8 @@ async def main() -> int:
                     await ws.send(
                         json.dumps({"type": "reply", "epoch": item.epoch, **item.meta})
                     )
+                elif item.kind == "control":
+                    await ws.send(json.dumps(item.meta))
             if not items:
                 wake.clear()
                 await wake.wait()
@@ -203,9 +218,13 @@ async def main() -> int:
         state["busy"] = True
         session: VoiceSession | None = None
         try:
-            session = VoiceSession(models)
+            session = VoiceSession(models, voiceprint=voiceprint)
             print("[session] opened", flush=True)
             send_task = asyncio.create_task(sender(ws, session))
+            if voiceprint is not None:
+                session.sink.post_control(
+                    {"type": "voiceprint", "enrolled": voiceprint.embedding is not None}
+                )
             try:
                 async for message in ws:
                     if isinstance(message, bytes | bytearray):
@@ -215,8 +234,13 @@ async def main() -> int:
                             control = json.loads(message)
                         except json.JSONDecodeError:
                             continue
-                        if control.get("type") == "eou":
+                        ctype = control.get("type")
+                        if ctype == "eou":
                             session.mark_eou()
+                        elif ctype == "enroll_start":
+                            session.enroll_start()
+                        elif ctype == "enroll_end":
+                            session.enroll_end()
             finally:
                 send_task.cancel()
         except Exception as exc:  # 会话级错误不能拖垮服务进程
