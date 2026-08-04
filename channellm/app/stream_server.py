@@ -25,6 +25,7 @@ import struct
 import threading
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -182,6 +183,18 @@ class VoiceSession:
         self.downlink_samples = 0
         self._vad_voiced = False
         self._vad_silent_samples = 0
+        self._gate_speaking = False
+        # Silero VAD 噪声门:加载失败自动降级能量阈值,不阻塞会话。
+        try:
+            from channellm.audio.vad import VoiceGate
+
+            vad_path = Path(__file__).resolve().parents[2] / "assets/silero_vad.onnx"
+            self._voice_gate = VoiceGate(
+                vad_path, min_silence_ms=int(VAD_SILENCE_MS)
+            )
+        except Exception as exc:  # noqa: BLE001 - 降级路径必须吞掉一切加载错误
+            print(f"[session] Silero VAD 不可用,降级能量阈值: {exc!r}", flush=True)
+            self._voice_gate = None
         orig_publish = self.sink.publish
 
         def counted_publish(pcm, tag):
@@ -222,8 +235,21 @@ class VoiceSession:
             self.tag = self.ingress.refresh_turn("ws-session")
             self.sink.post_turn(self.tag)
             print("[session] next turn (previous reply ended)", flush=True)
-        self._vad_feed(i16)
-        return int(self.ingress.push_frame(i16, sample_rate=INPUT_SAMPLE_RATE))
+        wave = i16.astype(np.float32, copy=False) / 32768.0
+        if self._voice_gate is not None:
+            gated = self._voice_gate.feed(wave)
+            if self._voice_gate.speaking != self._gate_speaking:
+                self._gate_speaking = self._voice_gate.speaking
+                print(f"[vad] speaking={self._gate_speaking}", flush=True)
+            if gated.size == 0:
+                return 0  # 仍在 pad 前瞻缓冲内
+            if self._voice_gate.speech_ended:
+                self._voice_gate.speech_ended = False
+                if self.ingress.flush_partial():
+                    print("[vad] Silero 话音结束,提前冲刷半块", flush=True)
+            return int(self.ingress.push_frame(gated, sample_rate=INPUT_SAMPLE_RATE))
+        self._vad_feed(i16)  # Silero 不可用时的能量阈值降级
+        return int(self.ingress.push_frame(wave, sample_rate=INPUT_SAMPLE_RATE))
 
     def _vad_feed(self, i16: np.ndarray) -> None:
         """能量 VAD:检测到"说话后静默"即提前冲刷,消除 chunk 对齐等待。"""
