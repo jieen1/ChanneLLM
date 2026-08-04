@@ -2,6 +2,8 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ChanneLLM 语音对话</title>
 <style>
@@ -42,9 +44,9 @@
 <h1>ChanneLLM 全双工语音</h1>
 <div class="state"><span id="dot" class="dot"></span><span id="state-text">未连接</span></div>
 <button id="toggle">开始对话</button>
-<div id="vp-row" style="display:none;width:100%;align-items:center;justify-content:center;gap:10px;
+<div id="vp-row" style="display:flex;width:100%;align-items:center;justify-content:center;gap:10px;
      background:#161b22;border-radius:12px;padding:8px 12px">
-  <span id="vp-status" style="font-size:13px;color:#8b949e"></span>
+  <span id="vp-status" style="font-size:13px;color:#8b949e">声纹状态待连接…</span>
   <button id="enroll-btn" style="font-size:13px;padding:6px 16px;border-radius:16px;background:#238636">录入声纹</button>
 </div>
 <div id="reply">（回复文本显示在这里）</div>
@@ -191,6 +193,7 @@ async function start() {
 
   ws.onopen = () => {
     running = true;
+    vpStatus.textContent = "已连接,等待声纹状态…";
     setState("listening", "已连接,说话即可");
     toggleBtn.textContent = "结束对话";
     toggleBtn.classList.add("stop");
@@ -215,7 +218,6 @@ async function start() {
         replyEl.textContent = msg.text || "";
         log(`回复文本: ${msg.text}`, "ev-ok");
       } else if (msg.type === "voiceprint") {
-        vpRow.style.display = "flex";
         vpStatus.textContent = msg.enrolled ? "声纹已录入 ✓(环境音将被过滤)" : "未录入声纹(环境音可能打断回复)";
         log(msg.enrolled ? "声纹已加载" : "声纹未录入,可点击『录入声纹』", "ev-info");
       } else if (msg.type === "enroll_started") {

@@ -225,6 +225,7 @@ class VoiceSession:
         self._enroll_runs: list[np.ndarray] = []
         self._enroll_run_parts: list[np.ndarray] = []
         self._enroll_voiced_n = 0
+        self._idle_chunks = 0
         # Silero VAD 噪声门:加载失败自动降级能量阈值,不阻塞会话。
         try:
             from channellm.audio.vad import VoiceGate
@@ -233,6 +234,7 @@ class VoiceSession:
             self._voice_gate = VoiceGate(
                 vad_path, min_silence_ms=int(VAD_SILENCE_MS)
             )
+            self._force_listen(True)  # 启动保护:首次真实语音前禁止自发说话
         except Exception as exc:  # noqa: BLE001 - 降级路径必须吞掉一切加载错误
             print(f"[session] Silero VAD 不可用,降级能量阈值: {exc!r}", flush=True)
             self._voice_gate = None
@@ -285,6 +287,9 @@ class VoiceSession:
         if self.queued.active_tag is None:
             self.tag = self.ingress.refresh_turn("ws-session")
             self.sink.post_turn(self.tag)
+            if self._voice_gate is not None and not self._gate_speaking:
+                self._force_listen(True)  # 回复结束:禁言直到下一次真实语音
+            self._idle_chunks = 0
             print("[session] next turn (previous reply ended)", flush=True)
         wave = i16.astype(np.float32, copy=False) / 32768.0
         if self._voice_gate is not None:
@@ -292,6 +297,9 @@ class VoiceSession:
             if self._voice_gate.speaking != self._gate_speaking:
                 self._gate_speaking = self._voice_gate.speaking
                 print(f"[vad] speaking={self._gate_speaking}", flush=True)
+                if self._gate_speaking:
+                    self._force_listen(False)  # 真实语音到达:允许模型抢话
+                    self._idle_chunks = 0
             if gated.size == 0:
                 return 0  # 仍在 pad 前瞻缓冲内
             if self._voice_gate.speech_ended:
@@ -301,6 +309,7 @@ class VoiceSession:
             gated = self._apply_voiceprint(gated)
             if gated.size == 0:
                 return 0  # 声纹门扣留/拦截:不下发
+            self._track_idle()
             return int(self.ingress.push_frame(gated, sample_rate=INPUT_SAMPLE_RATE))
         self._vad_feed(i16)  # Silero 不可用时的能量阈值降级
         return int(self.ingress.push_frame(wave, sample_rate=INPUT_SAMPLE_RATE))
@@ -326,6 +335,32 @@ class VoiceSession:
                     f"(silence>={VAD_SILENCE_MS}ms)",
                     flush=True,
                 )
+
+    def _force_listen(self, on: bool) -> None:
+        """强制 duplex 决策为 listen(官方 force_listen_count 机制)。
+
+        静默中模型会自发采样出 SPEAK tokens=1 伪回复并自我循环(每秒一次
+        next turn,用户听到的是死寂+频繁打断)。无真实语音因由时不允许抢话:
+        回复结束/会话开始 → 禁言,真实语音到达(VoicedGate 上升沿)→ 解除。
+        """
+        s = self.session
+        want = s._generate_count + (1 << 30) if on else 0
+        if (s.params.force_listen_count > s._generate_count) != on:
+            print(f"[duplex] force-listen={'on' if on else 'off'}", flush=True)
+        s.params.force_listen_count = want
+
+    def _track_idle(self) -> None:
+        """兜底:听完用户语音后模型迟迟不回复,8 个静默块后重新禁言。"""
+        reply_recent = (
+            self._last_publish_t is not None
+            and time.monotonic() - self._last_publish_t < 2.0
+        )
+        if self._gate_speaking or reply_recent:
+            self._idle_chunks = 0
+            return
+        self._idle_chunks += 1
+        if self._idle_chunks == 8:
+            self._force_listen(True)
 
     def _reply_active(self) -> bool:
         """回复音频仍在出站或客户端播放中(声纹门只在此期间工作)。
