@@ -2,7 +2,7 @@
 """P1 里程碑 —— 自研引擎语音生成闭环(文本 → 语音)。
 
 链路全部走自研引擎:
-Thinker(fp32 + Torch SDPA 语义 KV)采样生成回复文本并收集隐层
+Thinker(bf16 原生 + sparkinfer paged graph decode)采样生成回复文本并收集隐层
   -> Talker(hidden_text_merge 条件化)AR 采样 codec token
   -> Code2Wav(stepaudio2 Token2wav)合成 24kHz wav
 
@@ -187,6 +187,9 @@ def main() -> int:
     t0 = time.time()
     # 自定义循环:需要在 stop token 集合上停,且保留 Talker 所需的逐 token 隐层。
     # 采样参数对齐权重内 MiniCPMO.chat 的默认 generation config。
+    # graph 必须在空 KV 上捕获,然后才能 prefill。
+    graph = GraphDecodeSession(thinker, kv)
+    graph.capture()
     ids_cuda = torch.tensor(prompt_ids, dtype=torch.long, device=device)
     logits = thinker(ids_cuda, kv)
     prefill_s = time.time() - t0
@@ -202,8 +205,6 @@ def main() -> int:
         repetition_penalty=args.repetition_penalty,
         generator=text_generator,
     )
-    graph = GraphDecodeSession(thinker, kv)
-    graph.capture()
     for _ in range(args.max_text_tokens):
         _greedy, logits_row, hidden_row = graph.step(next_id)
         text_tokens.append(next_id)

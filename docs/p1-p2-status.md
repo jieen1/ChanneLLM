@@ -289,6 +289,14 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
+25. **长输入/长回复压力验证**:以自研生成链自举 33.3s 提问音频(p1_voice_loop
+    长 prompt:回复 120 文本 token、832 codec 帧、33.28s 语音,Code2Wav 合成
+    2.54s,RTF 0.08;Thinker graph decode 含采样 46.0 tok/s),重采样 16kHz 后
+    作为 duplex fixture realtime x2:26 个输入 chunk 全部在 1s 实时预算内
+    (embed 102-141ms + 决策 20-145ms),SDPA prefill/graph decode/页式 KV 在
+    ~300+ token 会话长度下无不稳。duplex 模型对该合成提问倾向短回应('嗯，'
+    级),长**输出**在 duplex 环内的量化依赖真实对话 fixture,留待 P3 真实输入
+    阶段;生成链本身的长输出能力已由 p1_voice_loop 证据覆盖。
 24. **决策采样向量化 + Code2Wav 深挖结论**:
     (a) `DuplexSession._decode_step` 的重复惩罚原为窗口内逐 token GPU 标量
     索引(512 窗口实测 2.8–4.4ms/步),改为一次 gather/scatter,与标量版
