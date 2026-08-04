@@ -304,13 +304,15 @@ class VoiceSession:
                 return 0  # 仍在 pad 前瞻缓冲内
             if self._voice_gate.speech_ended:
                 self._voice_gate.speech_ended = False
+                self._idle_chunks = 0  # 话音刚落:给模型充足的抢话窗口
                 if self.ingress.flush_partial():
                     print("[vad] Silero 话音结束,提前冲刷半块", flush=True)
             gated = self._apply_voiceprint(gated)
             if gated.size == 0:
                 return 0  # 声纹门扣留/拦截:不下发
-            self._track_idle()
-            return int(self.ingress.push_frame(gated, sample_rate=INPUT_SAMPLE_RATE))
+            units = int(self.ingress.push_frame(gated, sample_rate=INPUT_SAMPLE_RATE))
+            self._track_idle(units)
+            return units
         self._vad_feed(i16)  # Silero 不可用时的能量阈值降级
         return int(self.ingress.push_frame(wave, sample_rate=INPUT_SAMPLE_RATE))
 
@@ -349,8 +351,14 @@ class VoiceSession:
             print(f"[duplex] force-listen={'on' if on else 'off'}", flush=True)
         s.params.force_listen_count = want
 
-    def _track_idle(self) -> None:
-        """兜底:听完用户语音后模型迟迟不回复,8 个静默块后重新禁言。"""
+    def _track_idle(self, units: int) -> None:
+        """兜底:听完用户语音后模型迟迟不回复,8 个静默整块后重新禁言。
+
+        必须按 ingress 提交的整块计数(~1.03s/块),不能按上行帧:帧计数会在
+        话音结束 ~320ms 后就重新禁言,抢在模型的 SPEAK 决策之前杀掉回复。
+        """
+        if units == 0:
+            return
         reply_recent = (
             self._last_publish_t is not None
             and time.monotonic() - self._last_publish_t < 2.0
@@ -358,8 +366,8 @@ class VoiceSession:
         if self._gate_speaking or reply_recent:
             self._idle_chunks = 0
             return
-        self._idle_chunks += 1
-        if self._idle_chunks == 8:
+        self._idle_chunks += units
+        if self._idle_chunks >= 8:
             self._force_listen(True)
 
     def _reply_active(self) -> bool:
