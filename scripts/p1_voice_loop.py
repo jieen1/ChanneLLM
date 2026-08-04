@@ -108,17 +108,12 @@ def main() -> int:
     parser.add_argument("--top-p", type=float, default=0.8)
     parser.add_argument("--repetition-penalty", type=float, default=1.02)
     parser.add_argument("--seed", type=int, default=20_260_804)
-    parser.add_argument(
-        "--thinker-dtype",
-        choices=("fp32", "bf16"),
-        default="fp32",
-        help="默认 fp32 质量模式；bf16 仅用于性能诊断，未通过长序列 parity",
-    )
     parser.add_argument("--out", type=Path, default=Path("artifacts/p1/voice_loop_reply.wav"))
     args = parser.parse_args()
 
     device = torch.device("cuda")
-    thinker_dtype = torch.float32 if args.thinker_dtype == "fp32" else torch.bfloat16
+    # 权重原生 bf16,不做反量化;decode 走 sparkinfer paged CUDA graph。
+    thinker_dtype = torch.bfloat16
     talker_dtype = torch.bfloat16
     model_dir = find_snapshot()
     print(f"[setup] snapshot: {model_dir}")
@@ -128,6 +123,7 @@ def main() -> int:
 
     from channellm.engine.blocks import TorchStaticKV
     from channellm.engine.code2wav import Code2Wav
+    from channellm.engine.graph_decode import GraphDecodeSession
     from channellm.engine.talker import load_talker_weights
     from channellm.engine.thinker import (
         SparkinferPagedKV,
@@ -159,41 +155,27 @@ def main() -> int:
 
     # ---- Thinker:贪心生成回复文本 + 隐层 ----
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
-    if args.thinker_dtype == "fp32":
-        # fp32 + Torch SDPA 是当前唯一已证明长序列逐 token 对齐官方 Qwen3
-        # 的路径。预分配缓冲保留相同语义，同时避免 decode 时逐层 torch.cat。
-        kv = TorchStaticKV(
-            tconfig.num_hidden_layers,
-            tconfig.max_position_embeddings,
-            tconfig.num_kv_heads,
-            tconfig.head_dim,
-            device=device,
-            dtype=thinker_dtype,
-        )
-        kv_backend = "torch-static"
-    else:
-        pool = PagedKVPool(
-            num_layers=tconfig.num_hidden_layers,
-            num_pages=512,
-            page_size=64,
+    pool = PagedKVPool(
+        num_layers=tconfig.num_hidden_layers,
+        num_pages=512,
+        page_size=64,
+        num_kv_heads=tconfig.num_kv_heads,
+        head_dim=tconfig.head_dim,
+        dtype=thinker_dtype,
+        device=device,
+    )
+    attn = SparkinferPagedAttn(
+        PagedAttnConfig(
+            num_q_heads=tconfig.num_q_heads,
             num_kv_heads=tconfig.num_kv_heads,
             head_dim=tconfig.head_dim,
+            page_size=64,
             dtype=thinker_dtype,
-            device=device,
-        )
-        attn = SparkinferPagedAttn(
-            PagedAttnConfig(
-                num_q_heads=tconfig.num_q_heads,
-                num_kv_heads=tconfig.num_kv_heads,
-                head_dim=tconfig.head_dim,
-                page_size=64,
-                dtype=thinker_dtype,
-            ),
-            device,
-        )
-        kv = SparkinferPagedKV(pool, attn)
-        kv_backend = "sparkinfer"
-    print(f"[thinker] mode={args.thinker_dtype}/{kv_backend}")
+        ),
+        device,
+    )
+    kv = SparkinferPagedKV(pool, attn)
+    print("[thinker] mode=bf16/sparkinfer+graph")
 
     prompt_ids = build_prompt_ids(tokenizer, args.prompt)
     print(f"[thinker] prompt {len(prompt_ids)} tokens: {args.prompt!r}")
@@ -220,19 +202,17 @@ def main() -> int:
         repetition_penalty=args.repetition_penalty,
         generator=text_generator,
     )
+    graph = GraphDecodeSession(thinker, kv)
+    graph.capture()
     for _ in range(args.max_text_tokens):
-        logits, hs = thinker(
-            torch.tensor([next_id], dtype=torch.long, device=device),
-            kv,
-            output_hidden_states=True,
-        )
+        _greedy, logits_row, hidden_row = graph.step(next_id)
         text_tokens.append(next_id)
-        text_hiddens.append(hs[-1][-1].clone())
+        text_hiddens.append(hidden_row.clone())
         history.append(next_id)
         if hit_stop(next_id):
             break
         next_id = sample_text_token(
-            logits[-1], history,
+            logits_row, history,
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,

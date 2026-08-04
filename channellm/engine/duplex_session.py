@@ -69,11 +69,11 @@ class ChunkDecision:
 
 class DuplexSession:
     def __init__(self, thinker, kv, audio_front, params=None, graph=None) -> None:
-        """graph: 可选 StaticGraphDecodeSession(fp32 质量门禁通过后注入)。
+        """graph: GraphDecodeSession(sparkinfer paged,bf16 原生精度)。
 
         注入后,单 token decode(回复 token、chunk_eos、</unit>)走 CUDA graph
-        replay;多 token 的音频 prefill 仍走 eager。graph 为 None 时行为与
-        之前逐位一致。
+        replay;多 token 的音频 prefill 仍走 eager。graph 为 None 时退回
+        eager forward_embeds(仅诊断用)。
         """
         self.thinker = thinker
         self.kv = kv

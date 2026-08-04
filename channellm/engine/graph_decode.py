@@ -7,7 +7,10 @@ kernel 的 launch 开销与 Python 循环开销。
 状态契约:
 - 会话的 KV 仍在 SparkinferPagedKV/PagedKVPool 里,图会话只读页池、
   只推进 seq.length —— speak 段结束后回到 eager forward_embeds
-  (下一个音频 chunk)时状态完全一致;
+  (下一个音频 chunk)时状态完全一致;step() 通过 _expected_length 检测
+  eager prefill 的外部推进并重新同步静态页表;
+- hidden_buf 给出末层隐层(Talker hidden_text_merge 条件化所需),
+  与 StaticGraphDecodeSession 的 step 返回签名一致;
 - page_table/slot 缓冲每步 fill_ 更新;跨页边界(每 page_size 个
   token)由宿主侧更新 pt_buf 内容;
 - sparkinfer 侧用 use_cuda_graph=True 的独立 plan + disable_split_kv,
@@ -81,6 +84,8 @@ class GraphDecodeSession:
 
         self.graph: torch.cuda.CUDAGraph | None = None
         self.logits_buf: torch.Tensor | None = None
+        self.hidden_buf: torch.Tensor | None = None
+        self._expected_length: int | None = None
 
     def _sync_page_table(self) -> None:
         """把当前 seq 的页表同步进静态缓冲(跨页/会话开始时调用)。"""
@@ -155,6 +160,7 @@ class GraphDecodeSession:
             )
             hidden = hidden + layer.mlp(layer.post_attention_layernorm(hidden))
 
+        self.hidden_buf = hidden
         self.logits_buf = thinker.lm_head(thinker.norm(hidden))
 
     @torch.no_grad()
@@ -182,18 +188,36 @@ class GraphDecodeSession:
         with torch.cuda.graph(self.graph):
             self._decode_step()
         torch.cuda.synchronize()
-        # 复位会话状态:dummy 写入的槽位留给真实 prefill 覆盖
+        # 复位会话状态:释放 warmup/capture 占用的 dummy 页并同步静态页表,
+        # 否则真实 prefill 的页表与捕获期残留不一致,第二个 token 起分歧。
+        self.kv.pool.allocator.free(self.kv.seq.pages)
+        self.kv.seq.pages = []
         self.kv.seq.length = 0
+        self._sync_page_table()
+        self._expected_length = None
 
     @torch.no_grad()
-    def step(self, token_id: int) -> int:
-        """replay 一步 decode,返回下一个 token id。"""
+    def step(self, token_id: int) -> tuple[int, torch.Tensor, torch.Tensor]:
+        """replay 一步 decode,返回 ``(next_token_id, logits, last_hidden)``。
+
+        logits/hidden 是会话复用缓冲的视图,下一次 step 会覆写。duplex 环在
+        graph 步之间会插入 eager prefill(音频 chunk),``_expected_length``
+        检测到外部推进即重新同步静态页表,保证 replay 读到真实页表。
+        """
         if self.graph is None:
             raise RuntimeError("先调用 capture()")
-        pages_before = len(self.kv.seq.pages)
+        seq = self.kv.seq
+        external = self._expected_length is None or seq.length != self._expected_length
+        pages_before = len(seq.pages)
         self._fill_step_buffers(token_id)
-        if len(self.kv.seq.pages) != pages_before:
-            self._sync_page_table()  # 跨页边界:更新静态页表
+        if external or len(seq.pages) != pages_before:
+            self._sync_page_table()  # 外部 prefill 或跨页边界:更新静态页表
         self.graph.replay()
-        self.kv.seq.advance(1)
-        return int(self.logits_buf[0].argmax().item())
+        seq.advance(1)
+        self._expected_length = seq.length
+        assert self.logits_buf is not None and self.hidden_buf is not None
+        return (
+            int(self.logits_buf[0].argmax().item()),
+            self.logits_buf[0],
+            self.hidden_buf[0],
+        )

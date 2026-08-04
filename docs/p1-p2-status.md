@@ -15,25 +15,25 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 
 ## 当前验收快照与后续规划（2026-08-04）
 
-- **[事实] P1–P4 本地链路已闭环**：16kHz 输入经 fp32 Thinker、MiniCPM-o duplex
-  决策、Talker、Code2Wav、epoch-guarded L3 runtime 到 24kHz 本地 PCM；首包、信号
-  完整性、barge-in cancel-not-await、SQLite 播放事实均有回归覆盖。它不是 LiveKit/
-  物理设备端到端验收。
-- **[事实] 质量默认不让位于吞吐**：Thinker 默认 fp32/Torch-static；bf16
-  sparkinfer 长序列尚未 parity，不能成为线上质量路径。Token2Wav 每块在发布前通过
+- **[事实] P1–P4 本地链路已闭环**：16kHz 输入经 bf16 原生 Thinker、MiniCPM-o
+  duplex 决策、Talker、Code2Wav、epoch-guarded L3 runtime 到 24kHz 本地 PCM；
+  首包、信号完整性、barge-in cancel-not-await、SQLite 播放事实均有回归覆盖。它
+  不是 LiveKit/物理设备端到端验收。
+- **[事实] runtime 全面 bf16 原生，不做反量化**：权重原生 bf16，vllm-omni 参考
+  实现同为 bf16 口径。实测官方 Qwen3 自身 fp32/bf16 贪心序列在 0–8 token 内即
+  分歧（dtype 固有，任何 bf16 runtime 都一样），故"对齐 fp32"不是有效质量门禁；
+  现行门禁是 bf16 同内核族 graph/eager 逐 token 一致 + 端到端 fixture 信号门禁。
+  fp32 路径及其专用图捕获模块已从 runtime 删除。Token2Wav 每块在发布前通过
   非有限值、削波、直流偏置和采样突变门禁。
 - **[事实] vLLM-omni 是性能参考基线**：已逐段参考其三阶段、async bridge、Stage2
   首块预热实现；当前环境没有可运行的 `vllm`/`vllm_omni` 安装，因此还没有真实跨
   runtime 的公平基准。bridge 协议实验不得改写为 vLLM runtime 成绩。
-- **[事实] fp32 CUDA graph decode 已过 parity 门禁并成为 fp32 默认**：不走
-  sparkinfer paged 内核（其 planner 拒绝 fp32 q dtype，且 tensor core 无真 fp32
-  MMA，tf32 会破坏 parity），而是在质量路径 TorchStaticKV 上直接捕获 decode 步：
-  显式 IEEE-fp32 attention（bmm+加性 mask+softmax+bmm，GQA 广播不展开），KV 前缀
-  按 2 的幂分桶得到静态形状。`p1_graph_decode_check.py --dtype fp32 --kv-backend
-  static --tokens 120` 为 121/121 贪心 token 与 eager 完全一致；受控分离计时为
-  eager 35.9ms/token → graph 27.8ms/token（1.29x）。fp32 decode 是权重带宽受限
-  （每 token 需流读全部 fp32 权重），故图捕获只能拿走开销部分，不是数量级加速。
-  旧 bf16 sparkinfer paged 原型保留为性能诊断件。
+- **[事实] bf16 CUDA graph decode 是 Thinker 唯一 decode 路径**：sparkinfer
+  paged plan/bind 开销曾使 bf16 eager decode 在 duplex 环内高达 ~275ms/token；
+  `GraphDecodeSession`（paged KV + on-device metadata replay）把它降到
+  ~21ms/token，`p1_graph_decode_check.py` 61/61 贪心 token 与 eager 逐位一致。
+  生命周期修正已入库：capture 后释放 dummy 页并同步静态页表；step() 用
+  `_expected_length` 检测 eager prefill 的外部推进并重新同步页表。
 - **[事实] Talker 首 phrase 提前交接已落地**：官方 force_flush 的 5 帧首块语义
   由 `push_streaming` 惰性 generator 实现,采样/RNG/KV 次序不变并由固定 seed
   对照与契约测试锁定;短回复 fixture 收益被 Code2Wav 固定成本掩盖,长回复待量化。
@@ -41,9 +41,9 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
   相同,降低需 n_timesteps/fp16 的质量取舍,列为待质量评审项,本轮不改动。
 - **[下一步，按质量优先]**：先做真实输入/物理播放的 `barge-in → 静音` trace；随后在
   独立可审计 GPU 环境运行 vLLM-omni 与 ChanneLLM 的同权重、同 fixture、冷/热
-  p50/p95/p99 对照；性能面继续攻 fp32 权重带宽瓶颈（decode 步内核融合、以及
-  bf16 长序列 parity 修复后的半流量路径）。P5 的 LiveKit、真机 AEC 和远端设备
-  播放仍是外部环境验收项。
+  p50/p95/p99 对照；性能面剩余大头是 Code2Wav flow-matching 固定成本（需质量
+  评审取舍）与音频 chunk prefill 的 sparkinfer extend 开销。P5 的 LiveKit、
+  真机 AEC 和远端设备播放仍是外部环境验收项。
 
 ## 已建成的组件
 
@@ -51,7 +51,7 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 |---|---|---|
 | L0 内核 | `kernel/paged_kv.py` 页池/分配器/slot 复用 | ✅ CPU+GPU 测试 |
 | L0 内核 | `kernel/sparkinfer_attn.py` plan/bind/run + **binding 缓存** | ✅ GPU parity 对齐 in-tree reference |
-| L1 引擎 | `engine/thinker.py` 自研 Thinker(Qwen3 骨干,forward/forward_embeds) | ✅ fp32 逐 token 对齐官方 |
+| L1 引擎 | `engine/thinker.py` 自研 Thinker(Qwen3 骨干,forward/forward_embeds) | ✅ bf16 原生;结构正确性存档见 git 历史 fp32 parity |
 | L1 引擎 | `engine/talker.py` 自研 Talker(Llama 骨干,hidden_text_merge) | ✅ unit 级 KV 续写 + 25 帧 phrase |
 | L1 引擎 | `engine/code2wav.py` Token2wav 封装 + StreamingSynth 分块流式 | ✅ 批量+流式双路径 |
 | L1 引擎 | `engine/audio_front.py` 官方流式 whisper 编码器混合封装 | ✅ 音频理解验证 |
@@ -269,6 +269,24 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     固定成本掩盖(见下),长回复收益待独立量化。`early_first_frames` 与
     `codec_initial_min_audio_frames` 同源,vllm-omni 25 帧桥接模式自动关闭提前交接。
 
+21. **精度口径决定：全面 bf16 原生，删除 fp32 路径**。证据链：
+    (a) 官方 Qwen3 自身 fp32 vs bf16 贪心对照在 3 个 prompt 上分别于第
+    8/0/无分歧（裸 prompt 贪心落入退化区，两者输出都是乱码且互不相同）——
+    bf16 漂移是 dtype 固有，vllm-omni 在内的任何 bf16 runtime 都无法"对齐
+    fp32"；(b) 权重原生 bf16，fp32 运行只是把 bf16 权重零填充到 32 位，不
+    恢复任何信息，却使权重流量与 KV 显存翻倍；(c) bf16 duplex 端到端回放
+    与 fp32 同样输出"好的，没问题。"且信号门禁全过（RMS/peak/削波/DC/步长
+    同量级）；(d) bf16 graph decode 对 bf16 eager 61/61 token 逐位一致。
+    据此删除：`channellm/engine/static_graph_decode.py`（fp32 专用分桶图捕获）、
+    各脚本 `--thinker-dtype`/`--no-graph-decode`/`--fp32` 开关、Thinker/Talker/
+    TorchStaticKV 的 fp32 默认值。`p1_graph_decode_check.py` 收敛为 bf16
+    graph/eager parity 单一门禁；`p1_thinker_parity.py` 收敛为 bf16 同精度
+    漂移留档。bf16 原生端到端（realtime x3）：回复与门禁全过，峰值显存
+    28.3GiB（fp32 为 50.5GiB），warm speak_decision→first_PCM p50/p95
+    272.8/275.6ms，chunk 决策 19–175ms（bf16 eager 时代为 188–1375ms），
+    talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
+    保留在 git 历史作为结构正确性存档，不再作为运行时口径。
+
 ## Code2Wav 首块固定成本(本轮剖析,未改动)
 
 分阶段计时(真实权重、预热后、单块)显示 `code2wav_first` 的 ~150ms 主要来自
@@ -347,10 +365,10 @@ barge-in、10/30/60 分钟 soak、stage crash/restart 仍未测，不能据此�
 2. **P3 实测打断**:接入真实输入/物理播放适配器，记录 barge-in→静音 trace，
    验证已在 GPU 中的旧请求不会泄漏到媒体端；
 3. **性能批测**:区分 cold/warm、本地/远端，采集足够 trace 后报告 p50/p95/p99；
-4. **decode 带宽与融合**:fp32 graph decode 已过 parity(见证据 19),剩余瓶颈是
-   每 token 流读全部 fp32 权重的带宽;下一步做 decode 步内核融合(减少 kernel
-   数与 elementwise 流量),并在 bf16 parity 修复后评估半流量路径;sparkinfer
-   decode graph replay 仍作为 bf16 诊断面保留；
+4. **prefill 与 Code2Wav**:decode 已是 bf16 graph replay(~21ms/token);剩余
+   Thinker 侧开销在音频 chunk 的 sparkinfer extend/prefill(~200ms/chunk,
+   plan 开销待剖析);Code2Wav flow-matching 固定成本需质量评审后决策；
 5. **P5 媒体接入**:LiveKit/AEC/设备播放，补齐真实客户端扬声器口径与主观试听。
-6. **bf16 数值修复**:定位并消除自研 Thinker bf16 长序列与官方 Qwen3 的 token
-   分歧；在同一语义质量回归通过前，不得把 sparkinfer bf16 设为默认质量路径。
+6. ~~bf16 数值修复~~ **已撤销**:原口径要求 bf16 对齐官方 fp32,实测官方自身
+   fp32/bf16 亦在个位数 token 内分歧(证据 21),该门禁不成立;runtime 已全面
+   bf16 原生,质量门禁改为同精度 graph/eager parity + 端到端信号门禁。

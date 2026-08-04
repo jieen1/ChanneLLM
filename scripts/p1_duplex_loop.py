@@ -99,20 +99,6 @@ def main() -> int:
         help="用单 GPU worker 队列处理输入，验证 barge-in 不阻塞输入控制面。",
     )
     parser.add_argument(
-        "--thinker-dtype",
-        choices=("fp32", "bf16"),
-        default="fp32",
-        help="默认 fp32 质量模式；bf16 仅用于性能诊断，未通过长序列 parity",
-    )
-    parser.add_argument(
-        "--no-graph-decode",
-        action="store_true",
-        help=(
-            "关闭 fp32 CUDA graph decode(默认启用,已通过 "
-            "p1_graph_decode_check fp32 parity 门禁);用于 A/B 对照"
-        ),
-    )
-    parser.add_argument(
         "--vllm-omni-codec-bridge",
         action="store_true",
         help=(
@@ -126,7 +112,9 @@ def main() -> int:
         parser.error("--repeat 必须至少为 1")
 
     device = torch.device("cuda")
-    thinker_dtype = torch.float32 if args.thinker_dtype == "fp32" else torch.bfloat16
+    # 权重原生 bf16(vllm-omni 参考实现同口径);runtime 不做反量化,
+    # 也不提高运行时精度。
+    thinker_dtype = torch.bfloat16
     talker_dtype = torch.bfloat16
     model_dir = find_snapshot()
     print(f"[setup] snapshot: {model_dir}")
@@ -141,8 +129,8 @@ def main() -> int:
 
     patch_torchaudio_load()
     patch_torchaudio_save()
-    from channellm.engine.blocks import TorchStaticKV
     from channellm.engine.duplex_session import DuplexSession
+    from channellm.engine.graph_decode import GraphDecodeSession
     from channellm.engine.talker import TalkerStream, load_talker_weights
     from channellm.engine.thinker import (
         SparkinferPagedKV,
@@ -178,52 +166,30 @@ def main() -> int:
     print(cuda_memory_line())
 
     tconfig = ThinkerConfig.from_official(model_dir / "config.json")
-    if args.thinker_dtype == "fp32":
-        # fp32 + Torch SDPA 是唯一通过长序列逐 token parity 的质量路径。
-        # 静态缓存保留 SDPA 语义，避免逐 token/逐层 cat；每轮仅逻辑复位。
-        kv = TorchStaticKV(
-            tconfig.num_hidden_layers,
-            tconfig.max_position_embeddings,
-            tconfig.num_kv_heads,
-            tconfig.head_dim,
-            device=device,
-            dtype=thinker_dtype,
-        )
-        kv_backend = "torch-static"
-        if not args.no_graph_decode:
-            from channellm.engine.static_graph_decode import StaticGraphDecodeSession
-
-            graph_decode = StaticGraphDecodeSession(thinker, kv)
-            kv_backend = "torch-static+graph"
-        else:
-            graph_decode = None
-    else:
-        pool = PagedKVPool(
-            num_layers=tconfig.num_hidden_layers,
-            num_pages=512,
-            page_size=64,
+    pool = PagedKVPool(
+        num_layers=tconfig.num_hidden_layers,
+        num_pages=512,
+        page_size=64,
+        num_kv_heads=tconfig.num_kv_heads,
+        head_dim=tconfig.head_dim,
+        dtype=thinker_dtype,
+        device=device,
+    )
+    attn = SparkinferPagedAttn(
+        PagedAttnConfig(
+            num_q_heads=tconfig.num_q_heads,
             num_kv_heads=tconfig.num_kv_heads,
             head_dim=tconfig.head_dim,
+            page_size=64,
             dtype=thinker_dtype,
-            device=device,
-        )
-        attn = SparkinferPagedAttn(
-            PagedAttnConfig(
-                num_q_heads=tconfig.num_q_heads,
-                num_kv_heads=tconfig.num_kv_heads,
-                head_dim=tconfig.head_dim,
-                page_size=64,
-                dtype=thinker_dtype,
-            ),
-            device,
-        )
+        ),
+        device,
+    )
 
-        def make_kv():
-            return SparkinferPagedKV(pool, attn)
+    def make_kv():
+        return SparkinferPagedKV(pool, attn)
 
-        kv_backend = "sparkinfer"
-        graph_decode = None
-    print(f"[thinker] mode={args.thinker_dtype}/{kv_backend}")
+    print("[thinker] mode=bf16/sparkinfer+graph")
 
     wave, sr = sf.read(str(args.wav), dtype="float32")
     if sr != 16000:
@@ -275,8 +241,7 @@ def main() -> int:
     batch_id = f"{time.time_ns():x}" if args.repeat > 1 else ""
     all_records = []
     all_ok = True
-    if args.thinker_dtype == "bf16":
-        kv = None
+    kv = None
 
     for run_index in range(args.repeat):
         run_number = run_index + 1
@@ -294,13 +259,12 @@ def main() -> int:
         print(f"[run {run_number}/{args.repeat}] {temperature}: trace={run_trace}")
 
         # 每轮必须回到同样的模型会话起点；模型权重和 CUDA allocator 保持驻留。
-        if args.thinker_dtype == "bf16":
-            if run_index:
-                assert kv is not None
-                pool.free_seq(kv.seq)
-            kv = make_kv()
-        elif run_index:
-            kv.reset()
+        if run_index:
+            assert kv is not None
+            pool.free_seq(kv.seq)
+        kv = make_kv()
+        graph_decode = GraphDecodeSession(thinker, kv)
+        graph_decode.capture()
         audio_front.reset()
         session = DuplexSession(thinker, kv, audio_front, graph=graph_decode)
         session.prepare()

@@ -129,7 +129,7 @@ class TorchStaticKV:
         head_dim: int,
         *,
         device: torch.device | str = "cpu",
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         if min(num_layers, max_seq_len, num_kv_heads, head_dim) <= 0:
             raise ValueError("static KV dimensions must be positive")

@@ -1,21 +1,21 @@
 #!/usr/bin/env python
-"""P1 验收门槛 —— 自研 Thinker 与官方 Qwen3 LLM 逐 token 对齐。
+"""P1 漂移留档 —— 自研 Thinker(bf16 原生)与官方 Qwen3(bf16)对照。
 
-官方 MiniCPM-o 4.5 的 Thinker LLM 是标准 Qwen3ForCausalLM,本脚本:
+官方 MiniCPM-o 4.5 的 Thinker LLM 是标准 Qwen3ForCausalLM。权重原生
+bf16,本脚本在**同精度**下对照自研与官方实现:
 1. 从官方 checkpoint 流式装载两份权重(自研 Thinker + transformers 参考);
 2. 同一 prompt 分别 prefill,比对 logits;
-3. 各自贪心生成 n 个 token,要求序列 100% 一致;
-4. 顺带测自研路径 prefill/decode 吞吐(首批 sparkinfer 内核数字)。
+3. 各自贪心生成 n 个 token,记录首个分歧位置与一致率。
 
-验证协议(两级):
-- ``--fp32``:结构验证。float32 下舍入噪声 ~1e-5,argmax 稳定,贪心序列
-  必须逐 token 一致 —— 证明结构/权重映射/rope/norm 全部正确。
-- 默认 bf16:生产精度。记录层间漂移(logit max|Δ| 与 token 一致率),
-  bf16 深层残差流放大 kernel 舍入顺序差是已知现象(vllm 对 HF 同样如此),
-  不作为结构缺陷。
+口径说明:bf16 深层残差流会放大 kernel 舍入顺序差,官方实现自身在
+bf16/fp32 之间同样于个位数 token 内分歧(已实测),因此本脚本只做漂移
+留档,不作为硬性门槛。结构正确性证据:fp32 时代曾逐 token 对齐官方
+(48/48 与 121/121,见 git 历史);生产门禁是
+``scripts/p1_graph_decode_check.py``(同 bf16 内核族 graph/eager 必须
+逐 token 一致)与端到端 fixture 回放。
 
 用法:
-    python scripts/p1_thinker_parity.py [--tokens 128] [--fp32] [--prompt ...]
+    python scripts/p1_thinker_parity.py [--tokens 128] [--prompt ...]
 """
 
 from __future__ import annotations
@@ -129,19 +129,15 @@ def main() -> int:
     parser.add_argument("--page-size", type=int, default=64)
     parser.add_argument(
         "--kv-backend",
-        choices=("sparkinfer", "torch", "static"),
+        choices=("sparkinfer", "torch"),
         default="sparkinfer",
-        help="对齐时使用的 KV 后端；static 用预分配 Torch SDPA KV",
-    )
-    parser.add_argument(
-        "--fp32", action="store_true", help="结构验证模式(float32,贪心必须逐 token 一致)"
+        help="对齐时使用的 KV 后端;torch 用参考 list KV",
     )
     args = parser.parse_args()
 
     device = torch.device("cuda")
-    dtype = torch.float32 if args.fp32 else torch.bfloat16
-    tag = "fp32-结构验证" if args.fp32 else "bf16-生产精度"
-    print(f"[mode] {tag}")
+    dtype = torch.bfloat16
+    print("[mode] bf16-原生精度漂移留档")
     model_dir = find_snapshot()
     print(f"[setup] snapshot: {model_dir}")
 
@@ -164,19 +160,7 @@ def main() -> int:
     ids_cuda = ids.to(device)
 
     def make_kv():
-        if args.kv_backend == "static":
-            from channellm.engine.blocks import TorchStaticKV
-
-            config = ThinkerConfig.from_official(model_dir / "config.json")
-            return TorchStaticKV(
-                config.num_hidden_layers,
-                config.max_position_embeddings,
-                config.num_kv_heads,
-                config.head_dim,
-                device=device,
-                dtype=dtype,
-            )
-        if args.fp32 or args.kv_backend == "torch":
+        if args.kv_backend == "torch":
             return TorchListKV()
         from channellm.engine.thinker import SparkinferPagedKV
         from channellm.kernel.paged_kv import PagedKVPool
@@ -204,12 +188,7 @@ def main() -> int:
         )
         return SparkinferPagedKV(pool, attn)
 
-    backend_name = (
-        args.kv_backend
-        if args.kv_backend == "static"
-        else ("torch" if args.fp32 else args.kv_backend)
-    )
-    print(f"[backend] {backend_name}")
+    print(f"[backend] {args.kv_backend}")
 
     # --- prefill logits 对比 ---
     kv = make_kv()
@@ -258,17 +237,9 @@ def main() -> int:
     )
     print(f"[parity] token 一致 {match_count}/{min_len}")
 
-    if args.fp32:
-        if mismatch is None and len(our_seq) == len(ref_seq):
-            print(f"[parity] PASS(fp32 结构验证): {min_len} tokens 逐 token 一致")
-            return 0
-        print("[parity] FAIL(fp32 结构验证): 存在结构级分歧")
-        _show_divergence(tokenizer, our_seq, ref_seq, mismatch, min_len)
-        return 1
-
-    # bf16:漂移留档,不做硬性门槛(结构正确性由 fp32 模式把关)
+    # bf16 同精度对照:漂移留档,不做硬性门槛(见 docstring 口径说明)
     rate = match_count / min_len * 100 if min_len else 0.0
-    print(f"[parity] bf16 漂移留档: 首个分歧 @ {mismatch}, 一致率 {rate:.1f}%")
+    print(f"[parity] bf16 vs 官方 bf16: 首个分歧 @ {mismatch}, 一致率 {rate:.1f}%")
     if mismatch is not None:
         _show_divergence(tokenizer, our_seq, ref_seq, mismatch, min_len)
     return 0

@@ -167,7 +167,7 @@ class Talker(nn.Module):
         self,
         config: TalkerConfig,
         device: str | torch.device = "cpu",
-        dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.config = config
