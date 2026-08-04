@@ -74,6 +74,7 @@ class TalkerGraphDecodeSession:
         self.pos_buf = torch.empty(1, dtype=torch.long, device=self.device)
         self.len_buf = torch.empty(1, dtype=torch.long, device=self.device)
         self._arange = torch.arange(kv.max_seq_len, device=self.device)
+        self._neg_inf = torch.tensor(float("-inf"), dtype=self.dtype, device=self.device)
         self._entries: dict[int, _BucketEntry] = {}
         self._logits_buf: torch.Tensor | None = None
         self.capture_count = 0
@@ -90,10 +91,11 @@ class TalkerGraphDecodeSession:
         cos = cos.unsqueeze(1)
         sin = sin.unsqueeze(1)
 
-        valid = self._arange[:width] < self.len_buf
-        # mask 与模型同 dtype:bf16 下 -inf/0 仍精确表示,避免 softmax
-        # 升型后与 bf16 V 矩阵乘冲突。
-        mask = torch.where(valid, 0.0, float("-inf")).to(self.dtype)
+        # 替换式 mask:padding 位的分数被 -inf 直接替换,而非加 -inf。
+        # padding 槽位可能含陈旧数据(跨会话复用的显存位模式可含 NaN/Inf),
+        # 加性 mask 会遇到 Inf+(-Inf)=NaN / NaN 传播;替换式与 padding 内容
+        # 完全解耦。
+        valid = (self._arange[:width] < self.len_buf).view(1, 1, width)
 
         for li, layer in enumerate(talker.layers):
             h = layer.input_layernorm(hidden)
@@ -112,7 +114,7 @@ class TalkerGraphDecodeSession:
             scores = torch.matmul(
                 q.squeeze(0).unsqueeze(1), k_slice.transpose(1, 2)
             )
-            scores = scores * self.scale + mask.view(1, 1, width)
+            scores = torch.where(valid, scores * self.scale, self._neg_inf)
             probs = torch.softmax(scores, dim=-1)
             out = torch.matmul(probs, v_slice)
             out = out.reshape(1, cfg.num_heads * cfg.head_dim)

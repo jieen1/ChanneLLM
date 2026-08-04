@@ -134,8 +134,11 @@ class TorchStaticKV:
         if min(num_layers, max_seq_len, num_kv_heads, head_dim) <= 0:
             raise ValueError("static KV dimensions must be positive")
         shape = (num_layers, max_seq_len, num_kv_heads, head_dim)
-        self.k_pages = torch.empty(shape, device=device, dtype=dtype)
-        self.v_pages = torch.empty_like(self.k_pages)
+        # 必须清零:图捕获的显式 attention 会读到有效长度之外的 padding 槽位,
+        # torch.empty 的未初始化位模式可能含 NaN/Inf 位型,跨会话复用被释放
+        # 内存时会把 NaN 带进 softmax(实测第 2 会话全 logits NaN)。
+        self.k_pages = torch.zeros(shape, device=device, dtype=dtype)
+        self.v_pages = torch.zeros(shape, device=device, dtype=dtype)
         self.max_seq_len = max_seq_len
         self.prefix_len = 0
         self.length = 0
