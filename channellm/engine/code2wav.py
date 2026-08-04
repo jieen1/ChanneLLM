@@ -81,6 +81,38 @@ class Code2Wav:
         self.t2w.hift_cache_dict = _clone_recursive(hift_base)
 
     @torch.no_grad()
+    def prewarm_stream(
+        self,
+        *,
+        codec_frames: int = 25,
+        left_context_frames: int = 3,
+        silence_token: int = 4218,
+    ) -> None:
+        """在服务就绪阶段预热首个流式 vocoder chunk，随后恢复干净回合基线。
+
+        vLLM-omni 会在 Stage2 构造期用固定形状的首个 HiFT chunk 触发 CUDA/
+        cuDNN 初始化；这里通过 Token2wav 的公开流式入口完成同一件事，避免
+        依赖其内部模块结构。预热音频永不发布，且结束时重新复位所有流式 cache，
+        因而不能污染第一位用户的声纹条件或波形状态。
+        """
+        if codec_frames <= 0:
+            raise ValueError("codec_frames must be positive")
+        if left_context_frames < 0:
+            raise ValueError("left_context_frames must be non-negative")
+        self.stream_reset()
+        try:
+            self.t2w.stream(
+                [silence_token] * (codec_frames + left_context_frames),
+                self.ref_wav_path,
+                last_chunk=False,
+                return_waveform=True,
+            )
+        finally:
+            # 即使底层预热失败也恢复可诊断的干净状态；异常仍向调用者传播，不能
+            # 静默把首次真实请求变成未预热路径。
+            self.stream_reset()
+
+    @torch.no_grad()
     def stream_chunk(self, codec_tokens: list[int], last_chunk: bool = False) -> np.ndarray:
         """流式合成一块 codec token,返回 24kHz float32 波形块。"""
         if self.t2w.stream_cache is None:

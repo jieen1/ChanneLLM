@@ -195,6 +195,15 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
    vLLM-omni runtime 的绝对性能。检查显示本项目 `.venv` 与系统 Python 均未安装
    `vllm`/`vllm_omni`，所以真实跨 runtime benchmark 尚未执行；不得把该缺口写成
    vLLM-omni 已跑通或据此宣布 SLO。
+18. **从 vLLM-omni 迁入的 Stage2 首块预热**:其 `BatchedToken2Wav` 在构造期以
+   固定 50-mel 首块触发 HiFT 的 CUDA/cuDNN 初始化。自研 `Code2Wav.prewarm_stream()`
+   改用 Token2wav 的公开流式接口送入 `3 + 25` 个 silence codec，完成后无条件复位
+   flow/HiFT/module cache；单元测试锁定“预热块不发布、两次 reset、下一回合基线干净”。
+   三轮 paced 回放 `official-first-flush-prewarmed.batch-18c871b63bfde54e` 均输出
+   “好的，没问题。”且信号门禁全过（RMS=0.0669、peak=0.4213–0.4217、无削波）。
+   cold Code2Wav 首块为 207.1ms（此前未预热批次为 290.1ms），但 warm n=2 为
+   p50/p95/p99 `175.2/188.9/188.9ms`（此前为 `131.8/156.4/156.4ms`）；共享 GPU
+   噪声下不能从这一批推出稳定加速，保留实现和 trace，待独占 GPU 扩样验证。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 

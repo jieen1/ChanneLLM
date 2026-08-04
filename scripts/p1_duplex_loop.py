@@ -162,6 +162,10 @@ def main() -> int:
     t0 = time.monotonic()
     code2wav = Code2Wav(model_dir, model_dir / REF_WAV_SUFFIX)
     print(f"[load] Code2Wav {time.monotonic() - t0:.1f}s")
+    t0 = time.monotonic()
+    code2wav.prewarm_stream()
+    torch.cuda.synchronize()
+    print(f"[warm] Code2Wav first-stream shape {time.monotonic() - t0:.1f}s")
     torch.cuda.synchronize()
     print(cuda_memory_line())
 

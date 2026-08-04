@@ -125,3 +125,34 @@ def test_stream_reset_restores_mutated_flow_module_cache_buffers() -> None:
     for name, buffer in decoder.named_buffers():
         torch.testing.assert_close(buffer, expected[name])
     assert code2wav.t2w.stream_cache["estimator_cnn_cache"] is not decoder.cnn_cache_buffer
+
+
+def test_prewarm_stream_primes_a_valid_chunk_and_restores_turn_baseline() -> None:
+    calls: list[tuple[object, ...]] = []
+    resets: list[None] = []
+    code2wav = Code2Wav.__new__(Code2Wav)
+    code2wav.ref_wav_path = "unused.wav"
+    code2wav.t2w = SimpleNamespace(
+        stream=lambda *args, **kwargs: calls.append((*args, kwargs))
+    )
+    code2wav.stream_reset = lambda: resets.append(None)  # type: ignore[method-assign]
+
+    code2wav.prewarm_stream(codec_frames=5, left_context_frames=3, silence_token=9)
+
+    assert resets == [None, None]
+    assert calls == [([9] * 8, "unused.wav", {"last_chunk": False, "return_waveform": True})]
+
+
+@pytest.mark.parametrize(
+    ("codec_frames", "left_context_frames", "message"),
+    [(0, 3, "codec_frames"), (1, -1, "left_context_frames")],
+)
+def test_prewarm_stream_rejects_invalid_window(
+    codec_frames: int, left_context_frames: int, message: str
+) -> None:
+    code2wav = Code2Wav.__new__(Code2Wav)
+
+    with pytest.raises(ValueError, match=message):
+        code2wav.prewarm_stream(
+            codec_frames=codec_frames, left_context_frames=left_context_frames
+        )
