@@ -53,6 +53,18 @@ class PcmIngress:
         self._tag = self.submitter.begin_turn(speech_id)
         return self._tag
 
+    def flush_partial(self) -> bool:
+        """把未凑满的半块补静音凑满并立即提交(回合保持活跃)。
+
+        服务端 VAD 判定话音结束后调用:模型立刻得到"话音+静默"的完整块并
+        决策,不再等自然块边界。缓冲为空时无操作。
+        """
+        tag = self._require_active()
+        tail = self._chunker.flush_tail(pad_silence=True)
+        if tail is None:
+            return False
+        return bool(self.submitter.submit_audio(tag, tail))
+
     def push_frame(
         self,
         pcm: np.ndarray,

@@ -35,6 +35,12 @@ INPUT_SAMPLE_RATE = 16_000
 OUTPUT_SAMPLE_RATE = 24_000
 _EPOCH_STRUCT = struct.Struct("<H")
 
+# 服务端端点检测(能量 VAD):话音后静默达到阈值即提前冲刷半块,消除
+# 1.03s chunk 的对齐等待(平均 ~515ms)。阈值对齐业界端点检测常见取值
+# (OpenAI Realtime server_vad 默认 silence 500ms)。
+VAD_VOICE_RMS = 0.008
+VAD_SILENCE_MS = 450
+
 
 def pcm16_to_float32(payload: bytes) -> np.ndarray:
     """上行 PCM16 帧 → float32 波形;空帧返回空数组。"""
@@ -174,6 +180,8 @@ class VoiceSession:
         # 会话级遥测:上下行样本数 + 每 chunk 决策可见性。
         self.uplink_samples = 0
         self.downlink_samples = 0
+        self._vad_voiced = False
+        self._vad_silent_samples = 0
         orig_publish = self.sink.publish
 
         def counted_publish(pcm, tag):
@@ -183,12 +191,17 @@ class VoiceSession:
         self.sink.publish = counted_publish
         orig_process = self.driver.process_audio_chunk
 
+        import time as _time
+
+        self._t0 = _time.monotonic()
+
         def logged_process(tag, pcm):
             decision = orig_process(tag, pcm)
             if decision is not None:
                 kind = "LISTEN" if decision.is_listen else "SPEAK"
                 print(
-                    f"[chunk] {kind} tokens={decision.n_speak_tokens} "
+                    f"[chunk@{_time.monotonic() - self._t0:6.2f}s] {kind} "
+                    f"tokens={decision.n_speak_tokens} "
                     f"embed={decision.cost_embed_ms:.0f}ms "
                     f"decision={decision.cost_decision_ms:.0f}ms",
                     flush=True,
@@ -209,7 +222,30 @@ class VoiceSession:
             self.tag = self.ingress.refresh_turn("ws-session")
             self.sink.post_turn(self.tag)
             print("[session] next turn (previous reply ended)", flush=True)
+        self._vad_feed(i16)
         return int(self.ingress.push_frame(i16, sample_rate=INPUT_SAMPLE_RATE))
+
+    def _vad_feed(self, i16: np.ndarray) -> None:
+        """能量 VAD:检测到"说话后静默"即提前冲刷,消除 chunk 对齐等待。"""
+        rms = float(np.sqrt(np.mean(i16.astype(np.float32) ** 2))) / 32768.0
+        if rms > VAD_VOICE_RMS:
+            self._vad_voiced = True
+            self._vad_silent_samples = 0
+            return
+        if not self._vad_voiced:
+            return
+        self._vad_silent_samples += i16.size
+        if self._vad_silent_samples >= int(INPUT_SAMPLE_RATE * VAD_SILENCE_MS / 1000):
+            self._vad_voiced = False
+            self._vad_silent_samples = 0
+            if self.ingress.flush_partial():
+                import time as _time
+
+                print(
+                    f"[vad@{_time.monotonic() - self._t0:6.2f}s] 话音结束,提前冲刷半块"
+                    f"(silence>={VAD_SILENCE_MS}ms)",
+                    flush=True,
+                )
 
     def mark_eou(self) -> None:
         self.queued.on_eou(self.tag)
