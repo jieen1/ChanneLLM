@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChanneLLM 语音对话</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; background: #111; color: #eee;
+         display: flex; flex-direction: column; align-items: center; padding: 24px; gap: 14px; }
+  h1 { font-size: 20px; margin: 8px 0; }
+  button { font-size: 18px; padding: 14px 40px; border-radius: 30px; border: none;
+           background: #2d7ff9; color: white; cursor: pointer; }
+  button:disabled { background: #555; }
+  button.stop { background: #d9534f; }
+  #status { font-size: 13px; color: #9ad; min-height: 18px; text-align: center; }
+  #reply { font-size: 15px; min-height: 44px; max-width: 90vw; text-align: center; color: #cfc; }
+  .meter { display: flex; gap: 24px; font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<h1>ChanneLLM 全双工语音</h1>
+<button id="toggle">开始对话</button>
+<div id="status">未连接</div>
+<div id="reply"></div>
+<div class="meter">
+  <span id="up">↑ 0.0s</span>
+  <span id="down">↓ 0.0s</span>
+  <span id="epoch">epoch -</span>
+</div>
+<script>
+"use strict";
+const toggleBtn = document.getElementById("toggle");
+const statusEl = document.getElementById("status");
+const replyEl = document.getElementById("reply");
+const upEl = document.getElementById("up");
+const downEl = document.getElementById("down");
+const epochEl = document.getElementById("epoch");
+
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let captureNode = null;
+let micSource = null;
+let playbackNode = null;
+let running = false;
+let maxEpoch = -1;
+let sentSamples = 0;
+let recvSamples = 0;
+
+function setStatus(text) { statusEl.textContent = text; }
+
+async function start() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+
+  audioCtx = new AudioContext();
+  await audioCtx.audioWorklet.addModule("audio-worklet.js");
+
+  playbackNode = new AudioWorkletNode(audioCtx, "playback-processor");
+  playbackNode.connect(audioCtx.destination);
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+  micSource = audioCtx.createMediaStreamSource(micStream);
+  captureNode = new AudioWorkletNode(audioCtx, "capture-processor");
+  captureNode.port.onmessage = (e) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(e.data); // ArrayBuffer(Int16 @16k)
+      sentSamples += e.data.byteLength / 2;
+      upEl.textContent = `↑ ${(sentSamples / 16000).toFixed(1)}s`;
+    }
+  };
+  micSource.connect(captureNode);
+  // captureNode 不连到 destination(避免自听回声)
+
+  ws.onopen = () => { running = true; setStatus("已连接,说话即可"); toggleBtn.textContent = "结束对话"; toggleBtn.classList.add("stop"); };
+  ws.onclose = (e) => { stop(true); if (!running) setStatus(`连接关闭: ${e.reason || e.code}`); };
+  ws.onerror = () => setStatus("连接出错");
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string") {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "clear") {
+        playbackNode.port.postMessage({ type: "clear" });
+      } else if (msg.type === "turn") {
+        maxEpoch = msg.epoch;
+        epochEl.textContent = `epoch ${msg.epoch}`;
+      } else if (msg.type === "reply") {
+        replyEl.textContent = msg.text || "";
+      }
+      return;
+    }
+    // 二进制: 2 字节小端 epoch + PCM16 @24k
+    const view = new DataView(e.data);
+    const epoch = view.getUint16(0, true);
+    if (epoch < maxEpoch) return; // 陈旧回合音频(barge-in 后)
+    maxEpoch = epoch;
+    const buf = e.data.slice(2);
+    playbackNode.port.postMessage({ type: "push", buf }, [buf]);
+    recvSamples += buf.byteLength / 2;
+    downEl.textContent = `↓ ${(recvSamples / 24000).toFixed(1)}s`;
+  };
+}
+
+function stop(fromServer) {
+  running = false;
+  if (captureNode) { captureNode.disconnect(); captureNode.port.close(); captureNode = null; }
+  if (micSource) { micSource.disconnect(); micSource = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (playbackNode) { playbackNode.disconnect(); playbackNode = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (ws && !fromServer) { ws.close(); }
+  ws = null;
+  toggleBtn.textContent = "开始对话";
+  toggleBtn.classList.remove("stop");
+  if (!fromServer) setStatus("已结束");
+}
+
+toggleBtn.addEventListener("click", () => {
+  if (running || ws) { stop(false); } else { start().catch(err => setStatus(`启动失败: ${err.message}`)); }
+});
+</script>
+</body>
+</html>

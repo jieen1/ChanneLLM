@@ -37,6 +37,11 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 - **[事实] Talker 首 phrase 提前交接已落地**：官方 force_flush 的 5 帧首块语义
   由 `push_streaming` 惰性 generator 实现,采样/RNG/KV 次序不变并由固定 seed
   对照与契约测试锁定;短回复 fixture 收益被 Code2Wav 固定成本掩盖,长回复待量化。
+- **[事实] 流式应用层已搭建(WebSocket 服务 + Web 客户端)**:
+  `scripts/app_server.py` 单端口同供 `/ws` 与 web 静态文件;上行 PCM16 16kHz
+  二进制帧,下行 2 字节 epoch + PCM16 24kHz;协议与单会话边界见
+  `channellm/app/stream_server.py`。本机实测(无网络):话音结束→首个回复
+  音频 **831ms**,回复过信号门禁;离线 8 连会话 + 线上 3 轮 WebSocket 全过。
 - **[事实] Code2Wav 流式合成已启用官方 DiT CUDA graph 路径**：官方
   `DiT._init_cuda_graph_chunk` 内置 padding-cache+padding-mask 静态图机制
   (仅预置 30/48/96 mel 尺寸),自研窗口尺寸(首块 mel 10、常规 mel 56)在
@@ -296,6 +301,21 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
+27. **流式应用层上线 + 跨会话 NaN 根因修复**:
+    (a) 应用层:`channellm/app/stream_server.py`(VoiceSession/StreamingPlaybackSink)
+    + `scripts/app_server.py` 入口 + `web/`(AudioWorklet 采集/播放、60ms 起播
+    门限、线性重采样)。chunk 尺寸必须对齐 processor 流式块(16480/16000=1.03s,
+    实测 16000 会改变 duplex 决策)。单会话 MVP:Code2Wav 流式 cache 有状态,
+    多会话并发前须拆 per-session vocoder。
+    (b) 跨会话 NaN 事故根因:`TorchStaticKV` 用 `torch.empty` 分配,显式
+    attention(图捕获路径)会读有效长度外的 padding 槽位;第 2 会话复用被释放
+    显存时 padding 含 NaN/Inf 位模式,`Inf+(-Inf)=NaN` 使 softmax 全 NaN,
+    Talker 采样触发 device-side assert 并污染 CUDA 上下文。修复:① 分配清零
+    (torch.zeros);② 显式 attention 的 mask 由加性改为 torch.where 替换式,
+    与 padding 内容完全解耦;③ VoiceSession.close 确定性释放 KV 页与 graph
+    引用(此前泄漏使第 8 会话 capture 失效),capture 失败降级 eager。
+    验证:离线 8 连会话、线上 3 轮 WebSocket 全过;本机话音结束→首个回复
+    音频 831ms(≈chunk 对齐均值 515ms + 服务端 ~320ms,与延迟预算评估一致)。
 26. **Code2Wav DiT 官方 CUDA graph 路径接入(无需重写官方内核)**:此前结论
     "vocoder 开销消除需重写官方内核"被推翻——官方 `decoder_dit.py` 早已内置
     "padding cache + padding mask + 静态缓冲 replay"图机制(`_init_cuda_graph_chunk`),
