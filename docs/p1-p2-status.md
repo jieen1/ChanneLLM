@@ -37,8 +37,10 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 - **[事实] Talker 首 phrase 提前交接已落地**：官方 force_flush 的 5 帧首块语义
   由 `push_streaming` 惰性 generator 实现,采样/RNG/KV 次序不变并由固定 seed
   对照与契约测试锁定;短回复 fixture 收益被 Code2Wav 固定成本掩盖,长回复待量化。
-- **[事实] Code2Wav 首块 ~150ms 为 flow-matching 固定成本**：对 8/28 帧窗口近似
-  相同,降低需 n_timesteps/fp16 的质量取舍,列为待质量评审项,本轮不改动。
+- **[事实] Code2Wav flow-matching 已按人工试听决策降为 6 步**：同 codec 对照
+  批次(10/6/5 步)信号门禁全过,人工确认 10 步与 6 步音质无实质差异、5 步劣化,
+  故默认 `n_timesteps=6` 生效;fp16 组合因官方流式路径 dtype 不完整而不可用
+  (留档于脚本)。端到端回归:回复与门禁不变,warm 首 PCM p50 272.8→187.6ms。
 - **[下一步，按质量优先]**：先做真实输入/物理播放的 `barge-in → 静音` trace；随后在
   独立可审计 GPU 环境运行 vLLM-omni 与 ChanneLLM 的同权重、同 fixture、冷/热
   p50/p95/p99 对照；性能面剩余大头是 Code2Wav flow-matching 固定成本（需质量
@@ -287,15 +289,24 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
-## Code2Wav 首块固定成本(本轮剖析,未改动)
+## Code2Wav flow-matching 步数决策(2026-08-04 人工试听确认)
 
-分阶段计时(真实权重、预热后、单块)显示 `code2wav_first` 的 ~150ms 主要来自
-`flow.inference_chunk` 的 10 步 flow-matching(fp32 autocast),HiFT 与其它占比小;
-且该成本对 8 帧与 28 帧窗口近似相同(固定开销主导,非帧数主导)。参考音频
-条件(spk_emb/prompt_mels)已在 `self.cache` 一次性预编码,不是逐块重复项。
-因此 Talker 侧的任何首包优化在该 fixture 下都被这 ~150ms 下限掩盖。降低它需要
-质量取舍(减少 n_timesteps 或 fp16),均属"质量必须保证"约束下的待决策项,
-本轮不单方面执行;先记录剖析口径,待独立质量评审。
+分阶段计时显示 `code2wav_first` 主要来自 `flow.inference_chunk` 的 flow-matching
+步数(fp32 autocast),且对 8/28 帧窗口近似相同(固定开销主导);参考音频条件
+(spk_emb/prompt_mels)已在 `self.cache` 一次性预编码。`scripts/p1_code2wav_quality_ab.py`
+以同一固定 seed 的 100 帧 codec 在生产同款流式路径下对照:
+
+| 配置 | 首块 | 全段 | 信号门禁 | 人工试听 |
+|---|---|---|---|---|
+| 10 步(官方默认) | 135.2ms | 600.8ms | PASS | 好 |
+| 6 步 | 89.8ms | 488.3ms | PASS | 好(与 10 步无实质差异) |
+| 5 步 | 90.0ms | 364.6ms | PASS | 差一点 |
+
+据此默认 `n_timesteps=6`。fp16 选项实测不可用:官方 Token2wav 只对 flow 做
+half(),`set_stream_cache` 的 spk 仿射层与 hift cache 仍 fp32,直接 dtype 冲突;
+如需 fp16/bf16 vocoder 须改造官方实现内部,另行立项。端到端回归(realtime x3):
+回复"好的，没问题。"不变、门禁全过,warm code2wav_first p50 114.4ms、
+speak_decision→first_PCM p50 187.6ms(10 步时代为 272.8ms)。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 

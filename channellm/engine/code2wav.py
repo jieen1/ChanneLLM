@@ -11,6 +11,10 @@ campplus),``Token2wav(model_path)`` 原地加载。两条路径:
 
 参考:vllm-omni ``minicpmo_4_5_code2wav.py`` 的 prompt cache 生命周期与
 官方 modeling 2647 行附近的 stream_cache 复位逻辑。
+
+flow-matching 步数默认 6(官方默认 10):经 2026-08-04 同 codec 对照批次
+(scripts/p1_code2wav_quality_ab.py)人工试听确认 6 步与 10 步音质无实质
+差异、5 步劣化,首块延迟 135.2→89.8ms;信号门禁三者均通过。
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ class Code2Wav:
         model_dir: str | Path,
         ref_wav_path: str | Path,
         float16: bool = False,
-        n_timesteps: int = 10,
+        n_timesteps: int = 6,
     ) -> None:
         from stepaudio2.token2wav import Token2wav
 
