@@ -203,6 +203,12 @@ class VoiceSession:
             return 0
         i16 = np.frombuffer(payload, dtype=np.int16)
         self.uplink_samples += i16.size
+        # 多回合:上一回复 finish_turn 后 active_tag 清空,持续输入必须进入
+        # 新回合(顺带复位 talker/code2wav 流式状态),否则 submit_audio 全被拒。
+        if self.queued.active_tag is None:
+            self.tag = self.ingress.refresh_turn("ws-session")
+            self.sink.post_turn(self.tag)
+            print("[session] next turn (previous reply ended)", flush=True)
         return int(self.ingress.push_frame(i16, sample_rate=INPUT_SAMPLE_RATE))
 
     def mark_eou(self) -> None:
@@ -215,11 +221,25 @@ class VoiceSession:
         会在多会话下累积并污染后续 capture(实测第 8 会话 capture 失效)。
         """
         self.queued.close(timeout_s=timeout_s)
+        stats = self.queued.stats
         print(
             f"[session] summary: uplink={self.uplink_samples / INPUT_SAMPLE_RATE:.1f}s "
-            f"downlink={self.downlink_samples / OUTPUT_SAMPLE_RATE:.1f}s",
+            f"downlink={self.downlink_samples / OUTPUT_SAMPLE_RATE:.1f}s "
+            f"queue(enq={stats.enqueued} proc={stats.processed} "
+            f"drop_over={stats.dropped_overrun} drop_stale={stats.dropped_stale} "
+            f"fail={stats.failures})",
             flush=True,
         )
+        for failure in self.queued.failures[:2]:
+            import traceback
+
+            print(
+                "[session] worker failure: "
+                + "".join(
+                    traceback.format_exception(type(failure), failure, failure.__traceback__)
+                )[-1500:],
+                flush=True,
+            )
         try:
             self.models.pool.free_seq(self.session.kv.seq)
         except Exception:  # 释放失败不应掩盖断连清理

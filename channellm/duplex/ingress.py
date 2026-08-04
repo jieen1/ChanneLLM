@@ -44,6 +44,15 @@ class PcmIngress:
         self._tag = self.submitter.begin_turn(speech_id)
         return self._tag
 
+    def refresh_turn(self, speech_id: str = "") -> EpochTag:
+        """连续会话换新回合:保留未凑满的半块音频,只切换提交 tag。
+
+        与 begin_speech 不同:不重置 chunker(不丢正在累积的输入)。回复结束
+        (runtime active_tag 清空)后,下一段输入经此进入新回合。
+        """
+        self._tag = self.submitter.begin_turn(speech_id)
+        return self._tag
+
     def push_frame(
         self,
         pcm: np.ndarray,
