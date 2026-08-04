@@ -300,8 +300,14 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     CUDA graph 捕获要求静态形状,而官方 conformer attention cache 每 chunk
     `torch.cat` 增长(动态形状,除非重写官方内核为预分配最大缓存+索引写入);
     torch.compile(dynamic=True)在官方 flow_matching 代码上触发 PyTorch
-    PythonDispatcher 内部断言失败。结论:vocoder 开销消除属于"重写官方
-    vocoder 内核"级别的独立工程,不在本轮范围;6 步 fp32 维持现状。
+    PythonDispatcher 内部断言失败。续查两条低成本路径亦被实测关闭:
+    (i) channels_last——vocoder 全为 Conv1d(hift 85 个,无 Conv2d),
+    4D 内存格式不适用,转置数不减反增;(ii) cudnn.benchmark——稳态整段
+    合成 -11%(1137→1012ms),但每个新输入形状首调用触发 cuDNN 算法搜索,
+    实测冷首块 130ms→2223ms,且流式 tail 窗口长度随回复长度无界变化,
+    搜索成本会在对话中反复发生,已回退。结论:vocoder 开销消除属于"重写
+    官方 vocoder 内核"级别的独立工程(预分配最大 cache+索引写入以静态化
+    形状,方可图捕获),不在本轮范围;6 步 fp32 维持现状。
 23. **Talker decode 图捕获过门禁并接入默认路径**:Talker(20 层 Llama,
     12 头 MHA/head_dim 64)逐帧 decode 是 launch 受限负载,
     `channellm/engine/talker_graph_decode.py` 把单帧步捕获为按宽度分桶的图:
