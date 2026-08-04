@@ -50,6 +50,12 @@
     <div class="bar"><div id="play-fill" class="bar-fill"></div></div>
     <span id="buf-ms" style="width:56px"></span></div>
 </div>
+<div id="latency-card" style="width:100%;text-align:center;background:#101a2e;border-radius:12px;
+     padding:10px;display:none">
+  <div style="font-size:12px;color:#8b949e">端到端延迟(话音结束→首个回复音频)</div>
+  <div id="latency" style="font-size:30px;font-weight:700;color:#7da2ff">--</div>
+  <div id="latency-hist" style="font-size:11px;color:#7d8590;min-height:14px"></div>
+</div>
 <div class="meter">
   <span id="up">↑ 0.0s</span>
   <span id="down">↓ 0.0s</span>
@@ -65,6 +71,11 @@ const micFill = $("mic-fill"), playFill = $("play-fill"), bufMs = $("buf-ms"), l
 
 let ws = null, audioCtx = null, micStream = null, captureNode = null, micSource = null;
 let playbackNode = null, running = false, maxEpoch = -1, sentSamples = 0, recvSamples = 0;
+// 端到端延迟测量:电平 VAD 判定话音结束 → 首个回复音频到达
+let voiced = false, silenceStart = null, lastVoicedAt = null, voiceEndAt = null;
+let e2ePending = false, latencies = [];
+const VOICE_ON = 0.02, VOICE_OFF_MS = 700;
+const latencyCard = $("latency-card"), latencyEl = $("latency"), latencyHist = $("latency-hist");
 
 function log(text, cls) {
   const line = document.createElement("div");
@@ -127,6 +138,22 @@ async function start() {
     const d = e.data;
     if (d.type === "level") {
       micFill.style.width = Math.min(100, d.value * 300) + "%";
+      const now = performance.now();
+      if (d.value > VOICE_ON) {
+        voiced = true;
+        silenceStart = null;
+        lastVoicedAt = now;
+        e2ePending = false;      // 用户(重新)开口,本轮测量作废
+        voiceEndAt = null;
+      } else if (voiced) {
+        if (silenceStart === null) silenceStart = now;
+        if (now - silenceStart > VOICE_OFF_MS) {
+          voiced = false;
+          voiceEndAt = lastVoicedAt;
+          e2ePending = true;
+          log("检测到话音结束,计时中…", "ev-info");
+        }
+      }
       return;
     }
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -169,6 +196,15 @@ async function start() {
     const epoch = view.getUint16(0, true);
     if (epoch < maxEpoch) return;
     if (recvSamples === 0) log("收到首个回复音频,开始播放", "ev-ok");
+    if (e2ePending && voiceEndAt !== null) {
+      const lat = Math.round(performance.now() - voiceEndAt);
+      latencies.push(lat);
+      e2ePending = false;
+      latencyCard.style.display = "block";
+      latencyEl.textContent = lat + " ms";
+      latencyHist.textContent = "历史: " + latencies.slice(-5).join(" / ") + " ms";
+      log(`端到端延迟 ${lat}ms(话音结束→首个音频到达)`, "ev-ok");
+    }
     maxEpoch = epoch;
     const buf = e.data.slice(2);
     playbackNode.port.postMessage({ type: "push", buf }, [buf]);
