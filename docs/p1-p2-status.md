@@ -289,6 +289,19 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
+24. **决策采样向量化 + Code2Wav 深挖结论**:
+    (a) `DuplexSession._decode_step` 的重复惩罚原为窗口内逐 token GPU 标量
+    索引(512 窗口实测 2.8–4.4ms/步),改为一次 gather/scatter,与标量版
+    **逐位一致**(torch.equal 验证),降到 0.7ms/步;决策采样总开销 ~19ms/步,
+    其余为 softmax/multinomial/同步等不可语义变更部分。
+    (b) Code2Wav 深挖:torch.profiler 实测整段合成 wall 686.7ms 中 kernel
+    总和仅 136ms —— **80% 是 launch/主机侧开销**(每段 ~2500 个小 kernel,
+    含 2188 次 cudnn nchw→nhwc 转置)。但两条消开销路径均被实测阻断:
+    CUDA graph 捕获要求静态形状,而官方 conformer attention cache 每 chunk
+    `torch.cat` 增长(动态形状,除非重写官方内核为预分配最大缓存+索引写入);
+    torch.compile(dynamic=True)在官方 flow_matching 代码上触发 PyTorch
+    PythonDispatcher 内部断言失败。结论:vocoder 开销消除属于"重写官方
+    vocoder 内核"级别的独立工程,不在本轮范围;6 步 fp32 维持现状。
 23. **Talker decode 图捕获过门禁并接入默认路径**:Talker(20 层 Llama,
     12 头 MHA/head_dim 64)逐帧 decode 是 launch 受限负载,
     `channellm/engine/talker_graph_decode.py` 把单帧步捕获为按宽度分桶的图:
