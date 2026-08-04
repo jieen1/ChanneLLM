@@ -163,8 +163,9 @@ def main() -> int:
     print(f"[load] Code2Wav {time.monotonic() - t0:.1f}s")
     t0 = time.monotonic()
     code2wav.prewarm_stream()
+    code2wav.enable_stream_graphs()
     torch.cuda.synchronize()
-    print(f"[warm] Code2Wav first-stream shape {time.monotonic() - t0:.1f}s")
+    print(f"[warm] Code2Wav prewarm + stream graphs {time.monotonic() - t0:.1f}s")
     torch.cuda.synchronize()
     print(cuda_memory_line())
 

@@ -84,6 +84,67 @@ class Code2Wav:
         self.t2w.stream_cache = _clone_recursive(flow_base)
         self.t2w.hift_cache_dict = _clone_recursive(hift_base)
 
+    def enable_stream_graphs(
+        self,
+        mel_sizes: tuple[int, ...] = (10, 56),
+        max_size: int = 500,
+    ) -> None:
+        """启用官方 DiT 内置的 CUDA graph 流式路径,注册自研窗口尺寸。
+
+        官方 ``DiT._init_cuda_graph_chunk`` 已实现"padding cache + padding
+        mask + 静态缓冲 replay"的图机制(仅预置 30/48/96 三种 mel 尺寸);
+        自研流式窗口的 mel 尺寸不同(首块 8 token→mel 10,常规 28 token→
+        mel 56,实测为准),这里在封装层按同一机制注册
+        自己的尺寸,不改 vendored 源码。同实例开关对照实测 corr=0.99998
+        (与 eager 自身复现性基准相同),整段合成墙钟约 1.8x。
+
+        捕获成本每尺寸一次(warmup+capture),应在服务就绪期(prewarm_stream
+        之后)显式调用;重复调用幂等。未注册尺寸的窗口自动回落 eager。
+        """
+        decoder = self.t2w.flow.decoder.estimator
+        if getattr(decoder, "use_cuda_graph", False) and all(
+            s in decoder.graph_chunk for s in mel_sizes
+        ):
+            return
+        dtype, device = decoder.cnn_cache_buffer.dtype, decoder.cnn_cache_buffer.device
+        with torch.no_grad():
+            for chunk_size in mel_sizes:
+                decoder.max_size_chunk[chunk_size] = max_size
+                static_x1 = torch.zeros((2, 320, chunk_size), dtype=dtype, device=device)
+                static_t1 = torch.zeros((2, 1, 512), dtype=dtype, device=device)
+                static_mask1 = torch.ones(
+                    (2, chunk_size, max_size + chunk_size), dtype=torch.bool, device=device
+                )
+                static_att_cache = torch.zeros(
+                    (16, 2, 8, max_size, 128), dtype=dtype, device=device
+                )
+                static_cnn_cache = torch.zeros((16, 2, 1024, 2), dtype=dtype, device=device)
+                static_inputs1 = [
+                    static_x1, static_t1, static_mask1, static_cnn_cache, static_att_cache,
+                ]
+                static_new_cnn_cache = torch.zeros((16, 2, 1024, 2), dtype=dtype, device=device)
+                static_new_att_cache = torch.zeros(
+                    (16, 2, 8, max_size + chunk_size, 128), dtype=dtype, device=device
+                )
+                decoder.blocks_forward_chunk(
+                    static_x1, static_t1, static_mask1,
+                    static_cnn_cache, static_att_cache,
+                    static_new_cnn_cache, static_new_att_cache,
+                )
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    static_out1 = decoder.blocks_forward_chunk(
+                        static_x1, static_t1, static_mask1,
+                        static_cnn_cache, static_att_cache,
+                        static_new_cnn_cache, static_new_att_cache,
+                    )
+                decoder.inference_buffers_chunk[chunk_size] = {
+                    "static_inputs": static_inputs1,
+                    "static_outputs": [static_out1, static_new_cnn_cache, static_new_att_cache],
+                }
+                decoder.graph_chunk[chunk_size] = graph
+        decoder.use_cuda_graph = True
+
     @torch.no_grad()
     def prewarm_stream(
         self,

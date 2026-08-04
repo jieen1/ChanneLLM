@@ -37,6 +37,13 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 - **[事实] Talker 首 phrase 提前交接已落地**：官方 force_flush 的 5 帧首块语义
   由 `push_streaming` 惰性 generator 实现,采样/RNG/KV 次序不变并由固定 seed
   对照与契约测试锁定;短回复 fixture 收益被 Code2Wav 固定成本掩盖,长回复待量化。
+- **[事实] Code2Wav 流式合成已启用官方 DiT CUDA graph 路径**：官方
+  `DiT._init_cuda_graph_chunk` 内置 padding-cache+padding-mask 静态图机制
+  (仅预置 30/48/96 mel 尺寸),自研窗口尺寸(首块 mel 10、常规 mel 56)在
+  封装层按同一机制注册,不改 vendored 源码。同实例开关对照 corr=0.99998
+  (与 eager 自身复现性基准相同),整段合成墙钟约 1.8x,warm code2wav_first
+  p50 116→76.2ms,speak_decision→first_PCM p50 119.8ms(会话起点 1255ms,
+  累计 ~10.5x)。捕获成本 1.1s 在服务就绪期一次性支付。
 - **[事实] Code2Wav flow-matching 已按人工试听决策降为 6 步**：同 codec 对照
   批次(10/6/5 步)信号门禁全过,人工确认 10 步与 6 步音质无实质差异、5 步劣化,
   故默认 `n_timesteps=6` 生效;fp16 组合因官方流式路径 dtype 不完整而不可用
@@ -289,6 +296,17 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
+26. **Code2Wav DiT 官方 CUDA graph 路径接入(无需重写官方内核)**:此前结论
+    "vocoder 开销消除需重写官方内核"被推翻——官方 `decoder_dit.py` 早已内置
+    "padding cache + padding mask + 静态缓冲 replay"图机制(`_init_cuda_graph_chunk`),
+    只是预置尺寸(30/48/96 mel)与自研窗口不符。`Code2Wav.enable_stream_graphs`
+    在封装层镜像该机制注册自研尺寸(首块 8 token→mel 10、常规 28 token→mel 56,
+    实测探测为准;曾误估 50 导致未命中,以运行时 spy 修正)。验证方法论的关键
+    教训:flow ODE 初值 `rand_noise` 为无 seed 随机且每实例不同,跨实例波形对照
+    必须先同步该缓冲,否则把噪声差异误判为语义分歧(本轮两次误判均源于此);
+    最终同实例开关对照 corr=0.99998,与 eager 自身复现性基准一致。e2e realtime
+    x3:回复与信号门禁不变,捕获 1.1s 服务就绪期支付,warm code2wav_first p50
+    76.2ms(此前 116-118ms)、speak_decision→first_PCM p50 119.8ms。
 25. **长输入/长回复压力验证**:以自研生成链自举 33.3s 提问音频(p1_voice_loop
     长 prompt:回复 120 文本 token、832 codec 帧、33.28s 语音,Code2Wav 合成
     2.54s,RTF 0.08;Thinker graph decode 含采样 46.0 tok/s),重采样 16kHz 后
