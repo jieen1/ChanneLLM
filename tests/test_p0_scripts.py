@@ -123,6 +123,8 @@ def test_graph_decode_check_help_documents_quality_mode() -> None:
     assert "--dtype" in result.stdout
     assert "--tokens" in result.stdout
     assert "fp32" in result.stdout
+    assert "--kv-backend" in result.stdout
+    assert "static" in result.stdout
 
 
 def test_graph_decode_check_rejects_empty_decode_length() -> None:
@@ -134,3 +136,23 @@ def test_graph_decode_check_rejects_empty_decode_length() -> None:
     )
     assert result.returncode == 2
     assert "--tokens 必须至少为 1" in result.stderr
+
+
+def test_select_bucket_picks_smallest_fitting_width() -> None:
+    from channellm.engine.static_graph_decode import DEFAULT_BUCKETS, select_bucket
+
+    assert select_bucket(1, DEFAULT_BUCKETS) == 256
+    assert select_bucket(256, DEFAULT_BUCKETS) == 256
+    assert select_bucket(257, DEFAULT_BUCKETS) == 512
+    assert select_bucket(40960, DEFAULT_BUCKETS) == 40960
+
+
+def test_select_bucket_rejects_overflow_and_nonpositive_length() -> None:
+    import pytest
+
+    from channellm.engine.static_graph_decode import DEFAULT_BUCKETS, select_bucket
+
+    with pytest.raises(MemoryError):
+        select_bucket(40961, DEFAULT_BUCKETS)
+    with pytest.raises(ValueError):
+        select_bucket(0, DEFAULT_BUCKETS)
