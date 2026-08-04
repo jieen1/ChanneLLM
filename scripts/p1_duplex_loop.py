@@ -105,6 +105,14 @@ def main() -> int:
         help="默认 fp32 质量模式；bf16 仅用于性能诊断，未通过长序列 parity",
     )
     parser.add_argument(
+        "--no-graph-decode",
+        action="store_true",
+        help=(
+            "关闭 fp32 CUDA graph decode(默认启用,已通过 "
+            "p1_graph_decode_check fp32 parity 门禁);用于 A/B 对照"
+        ),
+    )
+    parser.add_argument(
         "--vllm-omni-codec-bridge",
         action="store_true",
         help=(
@@ -182,6 +190,13 @@ def main() -> int:
             dtype=thinker_dtype,
         )
         kv_backend = "torch-static"
+        if not args.no_graph_decode:
+            from channellm.engine.static_graph_decode import StaticGraphDecodeSession
+
+            graph_decode = StaticGraphDecodeSession(thinker, kv)
+            kv_backend = "torch-static+graph"
+        else:
+            graph_decode = None
     else:
         pool = PagedKVPool(
             num_layers=tconfig.num_hidden_layers,
@@ -207,6 +222,7 @@ def main() -> int:
             return SparkinferPagedKV(pool, attn)
 
         kv_backend = "sparkinfer"
+        graph_decode = None
     print(f"[thinker] mode={args.thinker_dtype}/{kv_backend}")
 
     wave, sr = sf.read(str(args.wav), dtype="float32")
@@ -282,7 +298,7 @@ def main() -> int:
         elif run_index:
             kv.reset()
         audio_front.reset()
-        session = DuplexSession(thinker, kv, audio_front)
+        session = DuplexSession(thinker, kv, audio_front, graph=graph_decode)
         session.prepare()
         sink = BufferedPlaybackSink()
         pos, idx = 0, 0

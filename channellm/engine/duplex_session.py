@@ -68,10 +68,17 @@ class ChunkDecision:
 
 
 class DuplexSession:
-    def __init__(self, thinker, kv, audio_front, params=None) -> None:
+    def __init__(self, thinker, kv, audio_front, params=None, graph=None) -> None:
+        """graph: 可选 StaticGraphDecodeSession(fp32 质量门禁通过后注入)。
+
+        注入后,单 token decode(回复 token、chunk_eos、</unit>)走 CUDA graph
+        replay;多 token 的音频 prefill 仍走 eager。graph 为 None 时行为与
+        之前逐位一致。
+        """
         self.thinker = thinker
         self.kv = kv
         self.audio_front = audio_front
+        self.graph = graph
         self.params = params or DuplexParams()
         tok = audio_front.tokenizer
         self.device = thinker.embed_tokens.weight.device
@@ -125,6 +132,9 @@ class DuplexSession:
 
     @torch.no_grad()
     def _feed_token(self, token_id):
+        if self.graph is not None:
+            _next_id, logits, _hidden = self.graph.step(token_id)
+            return logits.unsqueeze(0)
         return self.thinker.forward_embeds(self._embed_ids([token_id]), self.kv)
 
     def _decode_step(self, logits):
@@ -206,12 +216,19 @@ class DuplexSession:
             if token != self.speak_id:
                 self.res_ids.append(token)
                 n_speak += 1
-            out = self.thinker.forward_embeds(
-                self._embed_ids([token]), self.kv, output_hidden_states=True
-            )
-            logits_t, hiddens = out
-            logits = logits_t[-1].float()
-            hidden = hiddens[-1][-1]
+            if self.graph is not None:
+                _next_id, logits_g, hidden_g = self.graph.step(token)
+                logits = logits_g.float()
+                # graph 的 hidden 是复用缓冲,下一步 replay 会覆写;unit 条件化
+                # 在轮末才 stack,必须立刻克隆(eager 路径每步都是新张量)。
+                hidden = hidden_g.clone()
+            else:
+                out = self.thinker.forward_embeds(
+                    self._embed_ids([token]), self.kv, output_hidden_states=True
+                )
+                logits_t, hiddens = out
+                logits = logits_t[-1].float()
+                hidden = hiddens[-1][-1]
             end_of_turn = token in self.turn_terminator_ids
             if end_of_turn:
                 self.current_turn_ended = True

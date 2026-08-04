@@ -25,14 +25,20 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
 - **[事实] vLLM-omni 是性能参考基线**：已逐段参考其三阶段、async bridge、Stage2
   首块预热实现；当前环境没有可运行的 `vllm`/`vllm_omni` 安装，因此还没有真实跨
   runtime 的公平基准。bridge 协议实验不得改写为 vLLM runtime 成绩。
-- **[事实] CUDA graph 仍是隔离诊断原型**：2026-08-04 在真实权重、默认 fp32 下创建
-  graph session 失败，因本机 sparkinfer paged graph planner 不支持 `torch.float32`
-  q dtype。bf16 又未通过 Thinker 长序列 parity，故 graph 不接入默认路径，也不产生
-  性能承诺；应先补齐 fp32 kernel 支持及 token-parity 回归。
+- **[事实] fp32 CUDA graph decode 已过 parity 门禁并成为 fp32 默认**：不走
+  sparkinfer paged 内核（其 planner 拒绝 fp32 q dtype，且 tensor core 无真 fp32
+  MMA，tf32 会破坏 parity），而是在质量路径 TorchStaticKV 上直接捕获 decode 步：
+  显式 IEEE-fp32 attention（bmm+加性 mask+softmax+bmm，GQA 广播不展开），KV 前缀
+  按 2 的幂分桶得到静态形状。`p1_graph_decode_check.py --dtype fp32 --kv-backend
+  static --tokens 120` 为 121/121 贪心 token 与 eager 完全一致；受控分离计时为
+  eager 35.9ms/token → graph 27.8ms/token（1.29x）。fp32 decode 是权重带宽受限
+  （每 token 需流读全部 fp32 权重），故图捕获只能拿走开销部分，不是数量级加速。
+  旧 bf16 sparkinfer paged 原型保留为性能诊断件。
 - **[下一步，按质量优先]**：先做真实输入/物理播放的 `barge-in → 静音` trace；随后在
   独立可审计 GPU 环境运行 vLLM-omni 与 ChanneLLM 的同权重、同 fixture、冷/热
-  p50/p95/p99 对照；最后才评估已通过 fp32 parity 的 graph/compile 优化。P5 的
-  LiveKit、真机 AEC 和远端设备播放仍是外部环境验收项。
+  p50/p95/p99 对照；性能面继续攻 fp32 权重带宽瓶颈（decode 步内核融合、以及
+  bf16 长序列 parity 修复后的半流量路径）。P5 的 LiveKit、真机 AEC 和远端设备
+  播放仍是外部环境验收项。
 
 ## 已建成的组件
 
@@ -226,6 +232,27 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
    p50/p95/p99 `175.2/188.9/188.9ms`（此前为 `131.8/156.4/156.4ms`）；共享 GPU
    噪声下不能从这一批推出稳定加速，保留实现和 trace，待独占 GPU 扩样验证。
 
+19. **fp32 CUDA graph decode 过门禁并接入默认路径**：背景是 sparkinfer paged
+    planner 拒绝 fp32 q dtype，而 tensor core 没有真 fp32 MMA（tf32 截断尾数等价
+    引入 bf16 级误差），故不改 sparkinfer，改为在质量路径自身上做图捕获。
+    `channellm/engine/static_graph_decode.py` 把单 token 前向（embed→36 层→
+    lm_head）捕获为按宽度分桶的图：attention 用显式 IEEE-fp32 bmm+加性 mask+
+    softmax+bmm（padding 位 -inf，`exp(-inf)=0`、`x+0=x` 精确成立，mask 不改变
+    有效位置数值），KV 写位置/有效长度经设备端索引缓冲在 replay 时按值读取。
+    调试中发现本机（Blackwell SM120 + torch 2.13 cuBLAS）**捕获期执行的 GEMM
+    结果与 eager 分歧、replay 逐位一致**（最小复现：单 Linear 捕获期 diff≈2.2、
+    replay diff=0.0），因此每个桶捕获后立即 replay 一次，用正确结果覆写捕获期写
+    入 KV 的垃圾。门禁：`scripts/p1_graph_decode_check.py --dtype fp32
+    --kv-backend static --tokens 120` 输出 parity PASS（121/121 token 一致），
+    分离计时 graph 段 27.8ms/token vs eager 对照 35.9ms/token（1.29x，含逐 token
+    同步）；eager 对照本身快于早期 61ms/token 口径，因测量循环不同，不做跨口径
+    比较。`DuplexSession` 注入该会话后单 token decode 走 replay、多 token 音频
+    prefill 仍 eager；hidden 是复用缓冲，入 unit 条件化前克隆。短回复 fixture
+    （"好的，没问题。"）realtime x3 A/B：有/无 graph 均通过开口与信号完整性门禁、
+    文本一致，端到端延迟差在该 fixture 的短 unit 下不显著（p95 分别 404.8 /
+    399.7ms）；收益随 unit 长度线性放大，受控证据以门禁脚本为准。
+    `--no-graph-decode` 保留 eager 路径供后续 A/B。
+
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
 | 段 | cold n=1 p50 | warm n=4 p50/p95/p99 | 说明 |
@@ -294,8 +321,10 @@ barge-in、10/30/60 分钟 soak、stage crash/restart 仍未测，不能据此�
 2. **P3 实测打断**:接入真实输入/物理播放适配器，记录 barge-in→静音 trace，
    验证已在 GPU 中的旧请求不会泄漏到媒体端；
 3. **性能批测**:区分 cold/warm、本地/远端，采集足够 trace 后报告 p50/p95/p99；
-4. **CUDA graph 捕获 decode 步**(sparkinfer decode 原生支持 graph replay
-   + on-device metadata 重建)；
+4. **decode 带宽与融合**:fp32 graph decode 已过 parity(见证据 19),剩余瓶颈是
+   每 token 流读全部 fp32 权重的带宽;下一步做 decode 步内核融合(减少 kernel
+   数与 elementwise 流量),并在 bf16 parity 修复后评估半流量路径;sparkinfer
+   decode graph replay 仍作为 bf16 诊断面保留；
 5. **P5 媒体接入**:LiveKit/AEC/设备播放，补齐真实客户端扬声器口径与主观试听。
 6. **bf16 数值修复**:定位并消除自研 Thinker bf16 长序列与官方 Qwen3 的 token
    分歧；在同一语义质量回归通过前，不得把 sparkinfer bf16 设为默认质量路径。
