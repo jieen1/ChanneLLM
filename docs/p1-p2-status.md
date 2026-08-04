@@ -289,6 +289,17 @@ runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其
     talker_first_chunk p50 211ms。历史 fp32 parity 证据（48/48、121/121）
     保留在 git 历史作为结构正确性存档，不再作为运行时口径。
 
+23. **Talker decode 图捕获过门禁并接入默认路径**:Talker(20 层 Llama,
+    12 头 MHA/head_dim 64)逐帧 decode 是 launch 受限负载,
+    `channellm/engine/talker_graph_decode.py` 把单帧步捕获为按宽度分桶的图:
+    显式 bf16 bmm + 加性 mask(mask cast 到模型 dtype,避免 softmax 升型与
+    bf16 V 矩阵乘冲突),连续静态 KV 无页表同步问题,条件化 prefill 仍 eager。
+    门禁 `scripts/p1_talker_graph_check.py`:4 unit × 25 帧贪心 codec 流
+    eager/graph **100/100 逐帧一致**,受控计时 20.62→3.58ms/帧(5.76x),
+    捕获一次性开销 23ms。`TalkerStream.graph` 注入后 duplex 默认启用。
+    短回复 fixture realtime x3:回复与信号门禁不变,warm
+    speak_decision→first_PCM p50 156.7ms;该 fixture 单元短、决策循环长度
+    随机,端到端差被噪声掩盖,机制收益以受控门禁为准。
 22. **音频 prefill 改走 SDPA,单 chunk 处理 ~390ms→~105ms**:分阶段计时定位到
     每个 1s 音频 chunk 的 Thinker extend prefill(仅 11 个 q token)要 ~200ms,
     其中 sparkinfer 逐层 bind ~2.9ms×36≈105ms、run ~30ms、其余为主机侧

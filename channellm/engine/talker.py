@@ -352,6 +352,9 @@ class TalkerStream:
             device=talker.emb_text.weight.device,
         )
         self._early_first_frames = int(early_first_frames)
+        # 可选 TalkerGraphDecodeSession:注入后 decode 帧走 CUDA graph replay,
+        # 条件化 prefill 仍 eager。需与 self._kv(同一 TorchStaticKV)绑定。
+        self.graph = None
         self._started = False
         self.reset()
 
@@ -435,11 +438,15 @@ class TalkerStream:
             generated.append(token)
             # 25-frame phrase 的每一步都需要把采样 token 喂回 Talker。复用这个
             # 单元素设备 buffer，避免每步分配一个新的 CUDA tensor；采样顺序、
-            # generator 与 KV 写入次序保持不变。
-            self._codec_token_input.fill_(token)
-            token_embed = self.talker.emb_code(self._codec_token_input)
-            hidden = self.talker.forward_embeds(token_embed, self._kv)
-            logits = self.talker.head_code(hidden[-1])
+            # generator 与 KV 写入次序保持不变。graph 注入时 decode 帧走
+            # replay,返回的 logits 与 eager head_code 输出同为一维 [vocab]。
+            if self.graph is not None:
+                _g_tok, logits = self.graph.step(token)
+            else:
+                self._codec_token_input.fill_(token)
+                token_embed = self.talker.emb_code(self._codec_token_input)
+                hidden = self.talker.forward_embeds(token_embed, self._kv)
+                logits = self.talker.head_code(hidden[-1])
             if early_at and not emitted_early and len(generated) == early_at + 1:
                 emitted_early = True
                 yield list(generated[:early_at]), False

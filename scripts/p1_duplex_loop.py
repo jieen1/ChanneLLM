@@ -132,6 +132,7 @@ def main() -> int:
     from channellm.engine.duplex_session import DuplexSession
     from channellm.engine.graph_decode import GraphDecodeSession
     from channellm.engine.talker import TalkerStream, load_talker_weights
+    from channellm.engine.talker_graph_decode import TalkerGraphDecodeSession
     from channellm.engine.thinker import (
         SparkinferPagedKV,
         ThinkerConfig,
@@ -235,6 +236,7 @@ def main() -> int:
     talker_stream = TalkerStream(
         talker, early_first_frames=codec_initial_min_audio_frames
     )
+    talker_stream.graph = TalkerGraphDecodeSession(talker, talker_stream._kv)
     proc = audio_front.model.processor
     from channellm.audio.quality import inspect_signal
 
