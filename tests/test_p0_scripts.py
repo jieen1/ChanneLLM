@@ -110,3 +110,27 @@ def test_talker_benchmark_help_documents_repeatable_measurement():
     assert result.returncode == 0
     assert "--repeat" in result.stdout
     assert "25" in result.stdout
+
+
+def test_graph_decode_check_help_documents_quality_mode() -> None:
+    result = subprocess.run(
+        [str(PYTHON), str(REPO_ROOT / "scripts/p1_graph_decode_check.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "--dtype" in result.stdout
+    assert "--tokens" in result.stdout
+    assert "fp32" in result.stdout
+
+
+def test_graph_decode_check_rejects_empty_decode_length() -> None:
+    result = subprocess.run(
+        [str(PYTHON), str(REPO_ROOT / "scripts/p1_graph_decode_check.py"), "--tokens", "0"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "--tokens 必须至少为 1" in result.stderr
