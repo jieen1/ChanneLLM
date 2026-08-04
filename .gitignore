@@ -45,3 +45,6 @@ traces/
 # Kernel JIT caches (sparkinfer / cutlass-dsl)
 .cutlass_cache/
 certs/
+
+# 用户声纹(运行时注册产生)
+voiceprint.npy

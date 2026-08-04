@@ -50,8 +50,9 @@ VOICEPRINT_CONFIRM_S = 0.3     # 候选语音段挂起确认窗
 VOICEPRINT_MIN_ENROLL_S = 1.5  # 注册最少有效语音
 VOICEPRINT_MAX_ENROLL_S = 12.0  # 注册采集上限(防无界缓冲)
 VOICEPRINT_PATH = Path(__file__).resolve().parents[2] / "voiceprint.npy"
-# 回复"仍在播放"的判定:出站队列非空,或距最后一次音频发布不超过该尾窗。
-_REPLY_ACTIVE_TAIL_S = 1.0
+# 回复"仍在播放"的判定:合成远快于实时(Talker ~5x),下行音频以突发送达,
+# 客户端实际播放窗口 = 已发送音频时长 + 网络/起播余量,而非"最后发布时间"。
+_REPLY_PLAYBACK_MARGIN_S = 0.3
 
 
 def pcm16_to_float32(payload: bytes) -> np.ndarray:
@@ -207,6 +208,7 @@ class VoiceSession:
         self._vad_silent_samples = 0
         self._gate_speaking = False
         self._last_publish_t: float | None = None
+        self._published_since_clear = 0  # 上次 barge-in 后已发布的下行样本数
         # 声纹门:仅在模型回复播放中过滤非目标说话人,空闲收听零额外延迟。
         self._voiceprint = voiceprint
         self._speaker_gate = None
@@ -237,11 +239,20 @@ class VoiceSession:
         orig_publish = self.sink.publish
 
         def counted_publish(pcm, tag):
-            self.downlink_samples += int(np.asarray(pcm).size)
+            n = int(np.asarray(pcm).size)
+            self.downlink_samples += n
+            self._published_since_clear += n
             self._last_publish_t = time.monotonic()
             orig_publish(pcm, tag)
 
         self.sink.publish = counted_publish
+        orig_mute = self.sink.mute
+
+        def clearing_mute():
+            self._published_since_clear = 0  # barge-in:客户端缓冲已清空
+            orig_mute()
+
+        self.sink.mute = clearing_mute
         orig_process = self.driver.process_audio_chunk
 
         import time as _time
@@ -317,11 +328,18 @@ class VoiceSession:
                 )
 
     def _reply_active(self) -> bool:
-        """回复音频仍在出站/播放中(声纹门只在此期间工作)。"""
+        """回复音频仍在出站或客户端播放中(声纹门只在此期间工作)。
+
+        合成远快于实时,下行以突发送达:播放窗口 ≈ 已发送音频时长,
+        从最后一次发布时刻起算,再加网络/起播余量。
+        """
         if self.sink.pending_count > 0:
             return True
         last = self._last_publish_t
-        return last is not None and (time.monotonic() - last) < _REPLY_ACTIVE_TAIL_S
+        if last is None:
+            return False
+        playback_left = self._published_since_clear / OUTPUT_SAMPLE_RATE
+        return (time.monotonic() - last) < playback_left + _REPLY_PLAYBACK_MARGIN_S
 
     def _apply_voiceprint(self, gated: np.ndarray) -> np.ndarray:
         if self._enrolling:
@@ -354,7 +372,9 @@ class VoiceSession:
         print("[voiceprint] 注册开始", flush=True)
 
     def _enroll_collect(self, gated: np.ndarray) -> None:
-        voiced = gated != 0.0
+        from channellm.audio.speaker import bridge_voiced_mask
+
+        voiced = bridge_voiced_mask(gated)
         if not voiced.any():
             self._enroll_close_run()
             return
@@ -387,7 +407,12 @@ class VoiceSession:
             )
             print(f"[voiceprint] 注册失败:有效语音仅 {voiced_s:.1f}s", flush=True)
             return
-        emb = self._voiceprint.embedder.embed_average(self._enroll_runs)
+        # run 可能被停顿切碎到 <0.3s(嵌入下限):拼接后按 ~2s 切块求均值,
+        # 只要总有效语音达标就必然产出可靠嵌入。
+        full = np.concatenate(self._enroll_runs)
+        chunk_n = 2 * INPUT_SAMPLE_RATE
+        chunks = [full[i:i + chunk_n] for i in range(0, len(full), chunk_n)]
+        emb = self._voiceprint.embedder.embed_average(chunks)
         if emb is None:
             self.sink.post_control({"type": "enroll_failed", "reason": "no_valid_segment"})
             print("[voiceprint] 注册失败:无有效语音段", flush=True)

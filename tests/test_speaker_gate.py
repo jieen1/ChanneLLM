@@ -260,3 +260,26 @@ def test_real_embedder_separation_same_vs_other_speaker() -> None:
     assert same > 0.35, f"同人分段相似度 {same:.3f} 必须高于阈值"
     assert cross < 0.35, f"异人相似度 {cross:.3f} 必须低于阈值"
     assert same > cross + 0.15, "同人/异人需有充分间隔"
+
+
+def test_bridge_voiced_mask_fills_short_zero_holes() -> None:
+    """PCM16 量化零点洞(<=50ms)被桥接;真实静默(>50ms)保留。"""
+    from channellm.audio.speaker import bridge_voiced_mask
+
+    seg = np.ones(4800, dtype=np.float32)
+    seg[1000:1010] = 0.0    # 10 样本零点洞 → 桥接
+    seg[3000:3900] = 0.0    # 900 样本(56ms)静默 → 保留
+    m = bridge_voiced_mask(seg)
+    assert m[1000:1010].all()
+    assert not m[3000:3900].any()
+    assert m[:1000].all() and m[3900:].all()
+
+
+def test_gate_survives_pcm16_quantization_holes() -> None:
+    """带零点洞的同人音频不应被切碎:episode 内照常累积并开门。"""
+    gate, emb = _gate()
+    seg = _voiced(n=int(0.6 * SAMPLING_RATE))
+    seg[100::200] = 0.0  # 每 200 样本打一个单点洞
+    out = gate.feed(seg, reply_active=True)
+    assert gate.state == "open" and gate.event == "open"
+    assert out.size == seg.size  # 冲刷全部

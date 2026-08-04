@@ -34,6 +34,30 @@ def _normalize(vec: np.ndarray) -> np.ndarray:
     return vec / (float(np.linalg.norm(vec)) + 1e-9)
 
 
+def bridge_voiced_mask(frame: np.ndarray, *, bridge_s: float = 0.05) -> np.ndarray:
+    """样本级 voiced 掩码(样本 != 0),桥接不超过 bridge_s 的零点洞。
+
+    PCM16 量化会把轻语音样本变成精确 0.0,在 voiced 区内打出零点洞,
+    碎裂下游的 run/episode 判定(实测经 int16 传输后注册段全部 <0.3s)。
+    语音内部真实静默远超 bridge_s,桥接安全。
+    """
+    m = frame != 0.0
+    if m.size < 3 or not m.any():
+        return m
+    change = np.flatnonzero(np.diff(m.astype(np.int8))) + 1
+    starts = np.concatenate([[0], change])
+    ends = np.concatenate([change, [m.size]])
+    if len(starts) < 3:
+        return m
+    max_gap = int(bridge_s * SAMPLING_RATE)
+    out = m.copy()
+    for i in range(1, len(starts) - 1):
+        s, e = int(starts[i]), int(ends[i])
+        if not m[s] and (e - s) <= max_gap and m[starts[i - 1]] and m[starts[i + 1]]:
+            out[s:e] = True
+    return out
+
+
 class SpeakerEmbedder:
     """campplus 说话人嵌入(L2 归一化)。"""
 
@@ -152,7 +176,7 @@ class SpeakerGate:
             if self.state != "idle":
                 self._end_episode()
             return frame
-        voiced = frame != 0.0
+        voiced = bridge_voiced_mask(frame)
         if not voiced.any():
             self._advance_gap(frame.size)
             return frame[:0]  # 静默帧:本就无声,不下发
