@@ -22,6 +22,9 @@ PIPELINE_ORDER = (StageId.THINKER, StageId.TALKER, StageId.CODE2WAV)
 # vllm-omni 基线参数(deploy/minicpmo_4_5.yaml,实测后校准)
 CODEC_CHUNK_FRAMES = 25  # 首包延迟主旋钮
 CODEC_LEFT_CONTEXT_FRAMES = 3
+# 官方 duplex 首次 TTS 调用会 force-flush：有左上下文及至少 5 个新 codec
+# token 即可送入同一个 Token2Wav stream，避免把首包硬等到完整 25 帧。
+CODEC_INITIAL_MIN_AUDIO_FRAMES = 5
 # MiniCPM-o 官方流式 Token2wav 在首个 codec phrase 前插入同数量的静音码，
 # 使 25 个新帧立刻满足 25+3 的首块窗口。不能用文本 tokenizer 的 4218 推断；
 # 这是官方 `modeling_minicpmo.py` 明示的 S3 codec silence code。
@@ -64,4 +67,5 @@ class StageRequestState:
     # 属于该请求，绝不能跨 turn 复用。
     codec_buffer: list[Any] = dataclasses.field(default_factory=list)
     codec_prefix_seeded: bool = False
+    initial_codec_flush_attempted: bool = False
     terminal_emitted: bool = False

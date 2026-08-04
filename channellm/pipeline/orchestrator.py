@@ -26,6 +26,7 @@ from typing import Any
 
 from channellm.pipeline.stages import (
     CODEC_CHUNK_FRAMES,
+    CODEC_INITIAL_MIN_AUDIO_FRAMES,
     CODEC_LEFT_CONTEXT_FRAMES,
     CODEC_STREAM_SILENCE_TOKEN,
     PIPELINE_ORDER,
@@ -48,17 +49,21 @@ class Orchestrator:
         codec_chunk_frames: int = CODEC_CHUNK_FRAMES,
         codec_left_context_frames: int = CODEC_LEFT_CONTEXT_FRAMES,
         codec_silence_token: int = CODEC_STREAM_SILENCE_TOKEN,
+        codec_initial_min_audio_frames: int = CODEC_INITIAL_MIN_AUDIO_FRAMES,
     ) -> None:
         if codec_chunk_frames <= 0:
             raise ValueError("codec_chunk_frames must be positive")
         if codec_left_context_frames < 0:
             raise ValueError("codec_left_context_frames must be non-negative")
+        if codec_initial_min_audio_frames <= 0:
+            raise ValueError("codec_initial_min_audio_frames must be positive")
         if not isinstance(codec_silence_token, int):
             raise TypeError("codec_silence_token must be an int")
         self._requests: dict[str, StageRequestState] = {}
         self.codec_chunk_frames = codec_chunk_frames
         self.codec_left_context_frames = codec_left_context_frames
         self.codec_silence_token = codec_silence_token
+        self.codec_initial_min_audio_frames = codec_initial_min_audio_frames
         self._prewarmed: set[StageId] = set()
 
     def submit_initial(
@@ -131,13 +136,44 @@ class Orchestrator:
     def _route_talker(
         self, state: StageRequestState, chunk: Any, final: bool
     ) -> list[PipelineChunk]:
+        first_talker_delta = False
         if chunk is not None:
             frames = _as_frames(chunk)
             if frames:
+                first_talker_delta = not state.codec_prefix_seeded
                 self._seed_codec_prefix(state)
                 state.codec_buffer.extend(frames)
 
         emitted: list[PipelineChunk] = []
+        if first_talker_delta:
+            # MiniCPM-o 的首个 TTS 调用使用 force_flush：不必等待 25 帧，只要
+            # 有 3 帧前瞻和至少 5 个 codec 帧就调用同一 Token2Wav stream。该
+            # 尝试只属于首个 delta；若它本身不足阈值，后续仍走普通 25 帧节拍，
+            # 与官方 `force_flush` 的单次调用语义一致。
+            state.initial_codec_flush_attempted = True
+            initial_audio_frames = min(
+                self.codec_initial_min_audio_frames, self.codec_chunk_frames
+            )
+            initial_required = self.codec_left_context_frames + initial_audio_frames
+            if len(state.codec_buffer) >= initial_required:
+                initial_size = min(
+                    self.codec_chunk_frames + self.codec_left_context_frames,
+                    len(state.codec_buffer),
+                )
+                emitted.append(
+                    self._chunk(
+                        state,
+                        StageId.CODE2WAV,
+                        tuple(state.codec_buffer[:initial_size]),
+                        source=StageId.TALKER,
+                    )
+                )
+                consumed = min(
+                    self.codec_chunk_frames,
+                    initial_size - self.codec_left_context_frames,
+                )
+                del state.codec_buffer[:consumed]
+
         required = self.codec_chunk_frames + self.codec_left_context_frames
         while len(state.codec_buffer) >= required:
             emitted.append(

@@ -125,6 +125,29 @@ def test_orchestrator_incrementally_routes_and_flushes_codec_tail():
     assert orch.submit_update("r1", StageId.CODE2WAV, final=True) == []
 
 
+def test_orchestrator_force_flushes_official_short_first_codec_delta():
+    orch = Orchestrator(codec_chunk_frames=25, codec_left_context_frames=3)
+    state = orch.submit_initial("r1", turn_epoch=4, speech_id="s4")
+
+    codec = orch.submit_update("r1", StageId.TALKER, [1, 2, 3, 4, 5])
+
+    assert [chunk.payload for chunk in codec] == [(4218, 4218, 4218, 1, 2, 3, 4, 5)]
+    # 与官方 force_flush 一致：首包消费 5 帧，留下 3 帧作为连续 stream 的前瞻。
+    assert state.codec_buffer == [3, 4, 5]
+    assert state.initial_codec_flush_attempted
+
+
+def test_orchestrator_does_not_extend_first_force_flush_to_later_deltas():
+    orch = Orchestrator(codec_chunk_frames=25, codec_left_context_frames=3)
+    state = orch.submit_initial("r1", turn_epoch=4, speech_id="s4")
+
+    assert orch.submit_update("r1", StageId.TALKER, [1, 2, 3, 4]) == []
+    assert state.initial_codec_flush_attempted
+    # 官方只在第一轮 TTS 调用 force_flush；不足 5 帧时后续调用仍须攒满 25+3。
+    assert orch.submit_update("r1", StageId.TALKER, [5]) == []
+    assert state.codec_buffer == [4218, 4218, 4218, 1, 2, 3, 4, 5]
+
+
 def test_orchestrator_prewarm_once_and_cancel_drops_pending_codec():
     orch = Orchestrator()
     seen: list[StageId] = []

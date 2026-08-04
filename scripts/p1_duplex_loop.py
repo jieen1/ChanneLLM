@@ -104,6 +104,15 @@ def main() -> int:
         default="fp32",
         help="默认 fp32 质量模式；bf16 仅用于性能诊断，未通过长序列 parity",
     )
+    parser.add_argument(
+        "--vllm-omni-codec-bridge",
+        action="store_true",
+        help=(
+            "使用 vLLM-omni async bridge 的 25-token 首块门槛，和默认的官方 "
+            "MiniCPM-o 5-token first-force-flush 做同模型/同输入对照；这不是 "
+            "vLLM-omni runtime 的端到端性能基准。"
+        ),
+    )
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat 必须至少为 1")
@@ -215,7 +224,24 @@ def main() -> int:
     from channellm.duplex.runtime import RealtimeRuntime
     from channellm.metrics.latency import format_waterfall, waterfall
     from channellm.pipeline.orchestrator import Orchestrator
+    from channellm.pipeline.stages import (
+        CODEC_CHUNK_FRAMES,
+        CODEC_INITIAL_MIN_AUDIO_FRAMES,
+    )
     from channellm.tracing import Anchor, TraceRecorder, load_records
+
+    codec_initial_min_audio_frames = (
+        CODEC_CHUNK_FRAMES
+        if args.vllm_omni_codec_bridge
+        else CODEC_INITIAL_MIN_AUDIO_FRAMES
+    )
+    codec_bridge = (
+        "vllm-omni-async-25" if args.vllm_omni_codec_bridge else "official-force-flush-5"
+    )
+    print(
+        "[codec-bridge] "
+        f"{codec_bridge}: initial-audio-frames={codec_initial_min_audio_frames}"
+    )
 
     # 默认连续 KV 保持 Torch SDPA 数值语义，同时避免 Talker decode 的逐层 cat。
     talker_stream = TalkerStream(talker)
@@ -264,10 +290,21 @@ def main() -> int:
         with TraceRecorder(
             run_trace,
             session_id=f"p2-local-replay-{batch_id or 'single'}-{run_number}",
-            tags={"loc": "local", "temp": temperature, "run": str(run_number)},
+            tags={
+                "loc": "local",
+                "temp": temperature,
+                "run": str(run_number),
+                "codec_bridge": codec_bridge,
+            },
             append=False,
         ) as recorder:
-            runtime = RealtimeRuntime(Orchestrator(), sink, trace_recorder=recorder)
+            runtime = RealtimeRuntime(
+                Orchestrator(
+                    codec_initial_min_audio_frames=codec_initial_min_audio_frames
+                ),
+                sink,
+                trace_recorder=recorder,
+            )
             driver = DuplexPipelineDriver(
                 runtime,
                 session,

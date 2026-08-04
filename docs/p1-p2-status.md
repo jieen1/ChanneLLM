@@ -8,6 +8,11 @@ KV，25 帧 phrase 经有界进程内队列送入 Code2Wav，再由 epoch-guarde
 runtime 发布本地 PCM，并经可取消待播缓冲交给本地媒体 writer。当前证据仅覆盖
 GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上的 SLO 仍未完成。
 
+**性能核心对照**是 vLLM-omni 的 MiniCPM-o 三阶段实现；本项目不链接或调用其
+runtime，而以同权重、同输入、同 trace 口径复现并逐项验证其可迁移机制。下文明确
+区分“vLLM-omni async bridge 的同进程协议对照”和“实际 vLLM-omni runtime 基准”，
+前者不能冒充后者。
+
 ## 已建成的组件
 
 | 层 | 组件 | 状态 |
@@ -173,6 +178,23 @@ GPU→本地缓冲取出；LiveKit、AEC、物理设备播放及统计意义上�
    85GiB 共驻门槛；cold n=1 EOU→首 PCM=830.2ms，warm n=9 为
    p50/p95/p99=673.3/690.9/690.9ms。它证明该 fixture 的回合隔离与信号完整性，
    仍不等价于主观听感、远端播放或长会话 soak 验收。
+17. **vLLM-omni 核心对照（同环境 bridge）**:查阅本地 vLLM-omni 的
+   `tts2code2wav_async_chunk` 与其 24/25/26 帧回归后，确认其 async bridge 的
+   首块门槛是 25 个新 codec frame（加 3 个左上下文），而 MiniCPM-o 官方 duplex
+   首次 TTS 调用的 `force_flush` 允许 5 个新 frame。`p1_duplex_loop.py` 因此提供
+   `--vllm-omni-codec-bridge`，以同一已加载模型、同一 16kHz fixture、相同 paced
+   输入和 trace 锚点，将首块门槛切为 25；默认仍是官方 5-frame 语义。2026-08-04
+   两个各三轮批次的输出均为“好的，没问题。”，且所有 WAV 通过信号完整性门禁。
+   `official-first-flush.batch-18c870bdfbbd71d0` 的 warm n=2
+   speak-decision→first-PCM 为 p50/p95/p99 `258.3/289.3/289.3ms`，Talker 首块为
+   `322.2/345.5/345.5ms`；25-frame 对照
+   `vllm-omni-bridge.batch-18c870fc42c06aa3` 对应为
+   `1269.2/1355.3/1355.3ms` 与 `1296.3/1356.0/1356.0ms`。故本轮定位的主因是
+   首个 codec block 的等待，不是 Code2Wav（分别为 `131.8/156.4/156.4ms` 与
+   `164.4/204.1/204.1ms`）。这是可重复的**协议敏感性实验**，不表示实际
+   vLLM-omni runtime 的绝对性能。检查显示本项目 `.venv` 与系统 Python 均未安装
+   `vllm`/`vllm_omni`，所以真实跨 runtime benchmark 尚未执行；不得把该缺口写成
+   vLLM-omni 已跑通或据此宣布 SLO。
 
 ## 实时预算(质量优先五轮同进程本地 fixture 回放，非 SLO)
 
@@ -236,11 +258,14 @@ barge-in、10/30/60 分钟 soak、stage crash/restart 仍未测，不能据此�
 
 ## 下一步
 
-1. **P3 实测打断**:接入真实输入/物理播放适配器，记录 barge-in→静音 trace，
+1. **实际 vLLM-omni 基准**:在独立、可审计的 vLLM-omni 环境中，以固定权重、
+   固定 fixture、冷/热分组及同一 trace 锚点执行真实三阶段回放；记录 GPU 独占与
+   驱动状态，不能用同环境 bridge 替代；
+2. **P3 实测打断**:接入真实输入/物理播放适配器，记录 barge-in→静音 trace，
    验证已在 GPU 中的旧请求不会泄漏到媒体端；
-2. **性能批测**:区分 cold/warm、本地/远端，采集足够 trace 后报告 p50/p95/p99；
-3. **CUDA graph 捕获 decode 步**(sparkinfer decode 原生支持 graph replay
+3. **性能批测**:区分 cold/warm、本地/远端，采集足够 trace 后报告 p50/p95/p99；
+4. **CUDA graph 捕获 decode 步**(sparkinfer decode 原生支持 graph replay
    + on-device metadata 重建)；
-4. **P5 媒体接入**:LiveKit/AEC/设备播放，补齐真实客户端扬声器口径与主观试听。
-5. **bf16 数值修复**:定位并消除自研 Thinker bf16 长序列与官方 Qwen3 的 token
+5. **P5 媒体接入**:LiveKit/AEC/设备播放，补齐真实客户端扬声器口径与主观试听。
+6. **bf16 数值修复**:定位并消除自研 Thinker bf16 长序列与官方 Qwen3 的 token
    分歧；在同一语义质量回归通过前，不得把 sparkinfer bf16 设为默认质量路径。
