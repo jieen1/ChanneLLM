@@ -146,7 +146,9 @@ def main() -> int:
 
     t0 = time.monotonic()
     audio_front = AudioFront(model_dir, device=device, dtype=thinker_dtype)
-    print(f"[load] AudioFront {time.monotonic() - t0:.1f}s")
+    audio_front.prewarm()
+    torch.cuda.synchronize()
+    print(f"[load] AudioFront(含预热) {time.monotonic() - t0:.1f}s")
 
     t0 = time.monotonic()
     thinker = load_thinker_weights(model_dir, device=device, dtype=thinker_dtype)

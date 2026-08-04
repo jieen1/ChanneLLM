@@ -111,6 +111,18 @@ class AudioFront:
             self.model.processor.reset_streaming()
         self._chunk_idx = 0
 
+    def prewarm(self) -> None:
+        """预热音频编码器与流式 processor,随后恢复干净会话起点。
+
+        会话首个 chunk 曾付 ~300ms 冷启动(kernel 编译/选型 + processor
+        首帧初始化);服务就绪阶段喂一个静音 chunk 触发同样的路径,再复位
+        流式状态,第一位用户不再承担该成本。策略与 Code2Wav.prewarm_stream
+        一致:预热产物永不进入会话。
+        """
+        n = self.model.processor.get_streaming_chunk_size()
+        self.feed_chunk(np.zeros(n, dtype=np.float32))
+        self.reset()
+
     @torch.no_grad()
     def feed_chunk(self, pcm_16k: np.ndarray) -> torch.Tensor:
         """喂一个 16kHz chunk,返回 [n_tokens, 4096] audio embedding。"""
