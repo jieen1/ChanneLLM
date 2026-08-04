@@ -336,7 +336,12 @@ class TalkerStream:
     ``reset`` 即可同步丢弃旧回合状态，而不需要等待 GPU 旧请求完成。
     """
 
-    def __init__(self, talker: Talker, kv_factory=None) -> None:
+    def __init__(self, talker: Talker, kv_factory=None, early_first_frames: int = 0) -> None:
+        """early_first_frames>0 时,回合首个 phrase 生成到该帧数即先 yield 一次
+        (官方首次 TTS force_flush 的单次提前语义),其余帧在 phrase 结束时
+        yield;其他 unit 仍整 phrase 一次 yield。0 = 关闭。"""
+        if early_first_frames < 0:
+            raise ValueError("early_first_frames must be non-negative")
         self.talker = talker
         self._kv_factory = kv_factory or _static_kv_factory(talker)
         self._kv: KVBackend
@@ -346,6 +351,7 @@ class TalkerStream:
             dtype=torch.long,
             device=talker.emb_text.weight.device,
         )
+        self._early_first_frames = int(early_first_frames)
         self._started = False
         self.reset()
 
@@ -367,7 +373,38 @@ class TalkerStream:
         *,
         end_of_turn: bool = False,
     ) -> list[int]:
-        """生成本 unit 的 codec 帧；EOU 后立即释放该回合 KV。"""
+        """生成本 unit 的 codec 帧；EOU 后立即释放该回合 KV。
+
+        与 ``push_streaming`` 的逐位关系:flatten 后完全一致(同一生成核、
+        同一 RNG/KV 次序)。
+        """
+        frames: list[int] = []
+        for part, _is_last in self.push_streaming(
+            token_ids, hidden_states, end_of_turn=end_of_turn
+        ):
+            frames.extend(part)
+        return frames
+
+    @torch.no_grad()
+    def push_streaming(
+        self,
+        token_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        *,
+        end_of_turn: bool = False,
+    ):
+        """增量生成本 unit 的 codec 帧(惰性 generator)。
+
+        yield ``(frames, is_last)`` 对。回合首个 phrase(官方首次 TTS
+        force_flush 语义)在确认 phrase 越过 ``early_first_frames`` 阈值时
+        (即第 early+1 帧生成后)先 yield 前 ``early_first_frames`` 帧,调用方
+        可立刻交给 Code2Wav,其余帧在 generator 恢复时继续生成并在 phrase
+        结束(EOS 或满 25 帧)时 yield 尾段(is_last=True);其余 unit 整
+        phrase 一次 yield。延迟一帧确认保证尾段永不为空、final 总能附在
+        最后一个音频块上。提前交接不改变采样顺序、generator 推进与 KV
+        写入次序。调用方必须把 generator 跑到耗尽(或随后调用 reset),
+        否则回合状态(_started/EOT 复位)不落地。
+        """
         cfg = self.talker.config
         condition = self.talker.build_condition(token_ids, hidden_states, duplex=True)
         hidden = self.talker.forward_embeds(condition, self._kv)
@@ -377,7 +414,13 @@ class TalkerStream:
         # forward 把第 25 帧写进 KV。这里直接执行等价的 25 次“采样→写 KV”。
         target_frames = 25
         min_frames = 0 if (not self._started or end_of_turn) else target_frames
+        early_at = (
+            self._early_first_frames
+            if not self._started and 0 < self._early_first_frames < target_frames
+            else 0
+        )
         generated: list[int] = []
+        emitted_early = False
         completed_phrase = True
         for _ in range(target_frames):
             token = self.talker._sample_codec(
@@ -397,6 +440,9 @@ class TalkerStream:
             token_embed = self.talker.emb_code(self._codec_token_input)
             hidden = self.talker.forward_embeds(token_embed, self._kv)
             logits = self.talker.head_code(hidden[-1])
+            if early_at and not emitted_early and len(generated) == early_at + 1:
+                emitted_early = True
+                yield list(generated[:early_at]), False
 
         if completed_phrase:
             # 官方在第 26 次 decode 时会采样一个不返回的 lookahead token。
@@ -409,10 +455,12 @@ class TalkerStream:
                 min_new_tokens=min_frames,
             )
 
+        emitted = early_at if emitted_early else 0
+        yield list(generated[emitted:]), True
+
         self._started = True
         if end_of_turn:
             self.reset()
-        return generated
 
 
 def _static_kv_factory(talker: Talker):

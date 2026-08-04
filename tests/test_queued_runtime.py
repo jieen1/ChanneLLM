@@ -60,11 +60,11 @@ class _BlockingTalker(_Talker):
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def push(self, _token_ids, _hidden_states, *, end_of_turn: bool) -> list[int]:
+    def push_streaming(self, _token_ids, _hidden_states, *, end_of_turn: bool):
         assert not end_of_turn
         self.started.set()
         assert self.release.wait(1.0)
-        return [1, 2]
+        yield [1, 2], True
 
 
 class _SpeakingSession:

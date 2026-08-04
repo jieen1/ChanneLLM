@@ -258,3 +258,69 @@ def test_map_tts_key() -> None:
     )
     assert map_tts_key("tts.projector_spk.linear1.weight") is None
     assert map_tts_key("llm.lm_head.weight") is None
+
+
+def _fixed_sampler(talker: Talker, tokens: list[int]) -> None:
+    """用固定序列替换采样,隔离 streaming 切分语义(不受随机 EOS 干扰)。"""
+    seq = iter(tokens)
+    talker._sample_codec = (
+        lambda _logits, _generated, _generator, min_new_tokens=None: next(seq)
+    )
+
+
+def test_push_streaming_yields_early_first_phrase_segment() -> None:
+    torch.manual_seed(41)
+    talker = Talker(tiny_config())
+    stream = TalkerStream(talker, TorchListKV, early_first_frames=5)
+    _fixed_sampler(talker, [10 + (i % 50) for i in range(40)])
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+
+    emissions = list(stream.push_streaming(ids, hidden))
+
+    assert [len(part) for part, _last in emissions] == [5, 20]
+    assert [last for _part, last in emissions] == [False, True]
+
+
+def test_push_streaming_second_unit_is_single_emission() -> None:
+    torch.manual_seed(41)
+    talker = Talker(tiny_config())
+    stream = TalkerStream(talker, TorchListKV, early_first_frames=5)
+    _fixed_sampler(talker, [10 + (i % 50) for i in range(80)])
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+
+    first = list(stream.push_streaming(ids, hidden))
+    second = list(stream.push_streaming(ids, hidden))
+
+    assert [len(part) for part, _last in first] == [5, 20]
+    assert [(len(part), last) for part, last in second] == [(25, True)]
+
+
+def test_push_streaming_short_phrase_stays_single_emission() -> None:
+    torch.manual_seed(41)
+    config = tiny_config()
+    talker = Talker(config)
+    stream = TalkerStream(talker, TorchListKV, early_first_frames=5)
+    # 第 3 帧即 EOS(7):未越过提前阈值,必须整段一次交出。
+    _fixed_sampler(talker, [10, 11, config.codec_eos_token_id])
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+
+    emissions = list(stream.push_streaming(ids, hidden, end_of_turn=True))
+
+    assert emissions == [([10, 11], True)]
+
+
+def test_push_matches_push_streaming_flatten_under_fixed_seed() -> None:
+    torch.manual_seed(43)
+    talker = Talker(tiny_config())
+    ids = torch.tensor([5, 9])
+    hidden = torch.randn(2, 96)
+    early = TalkerStream(talker, TorchListKV, early_first_frames=5)
+    plain = TalkerStream(talker, TorchListKV)
+
+    assert early.push(ids, hidden) == plain.push(ids, hidden)
+    assert early.push(ids, hidden, end_of_turn=True) == plain.push(
+        ids, hidden, end_of_turn=True
+    )

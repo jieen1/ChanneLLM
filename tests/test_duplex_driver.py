@@ -40,8 +40,16 @@ class FakeTalkerStream:
         self.reset_calls += 1
 
     def push(self, token_ids, _hidden_states, *, end_of_turn: bool):
+        frames: list[int] = []
+        for part in self.push_streaming(
+            token_ids, _hidden_states, end_of_turn=end_of_turn
+        ):
+            frames.extend(part)
+        return frames
+
+    def push_streaming(self, token_ids, _hidden_states, *, end_of_turn: bool):
         self.push_calls.append((token_ids.tolist(), end_of_turn))
-        return [11, 12]
+        yield [11, 12], True
 
 
 class FakeCode2Wav:

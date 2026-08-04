@@ -36,9 +36,9 @@ class _Talker:
     def reset(self) -> None:
         pass
 
-    def push(self, _token_ids, _hidden_states, *, end_of_turn: bool) -> list[int]:
+    def push_streaming(self, _token_ids, _hidden_states, *, end_of_turn: bool):
         assert end_of_turn
-        return [7, 8]
+        yield [7, 8], True
 
 
 class _Code2Wav:

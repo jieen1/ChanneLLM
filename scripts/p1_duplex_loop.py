@@ -264,7 +264,11 @@ def main() -> int:
     )
 
     # 默认连续 KV 保持 Torch SDPA 数值语义，同时避免 Talker decode 的逐层 cat。
-    talker_stream = TalkerStream(talker)
+    # early_first_frames 与首块门槛同源:官方 force_flush=5 时首 5 帧立即交给
+    # Code2Wav;vllm-omni 25 帧桥接模式下阈值==phrase 长度,提前交接自动关闭。
+    talker_stream = TalkerStream(
+        talker, early_first_frames=codec_initial_min_audio_frames
+    )
     proc = audio_front.model.processor
     from channellm.audio.quality import inspect_signal
 

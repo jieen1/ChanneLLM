@@ -107,20 +107,27 @@ class DuplexPipelineDriver:
             condition = talker_input.payload
             if not isinstance(condition, ThinkerUnit):
                 raise TypeError("Thinker stage must emit ThinkerUnit")
-            codec_tokens = self.talker_stream.push(
+            emissions = self.talker_stream.push_streaming(
                 condition.token_ids,
                 condition.hidden_states,
                 end_of_turn=condition.end_of_turn,
             )
-            code2wav_inputs = self.runtime.submit_stage_output(
-                tag,
-                StageId.TALKER,
-                codec_tokens,
-                final=condition.end_of_turn,
-            )
-            for code2wav_input in code2wav_inputs:
-                self.talker_to_code2wav.put_nowait(code2wav_input)
-        self._synthesize(tag, self._drain(self.talker_to_code2wav))
+            # 惰性交错:每收到一段 codec 帧立即编排+合成,首段(官方
+            # force_flush 提前帧)直达 Code2Wav,不必等满 25 帧 phrase。
+            # is_last 与 end_of_turn 合成 final,保证终止输入仍附在最后一个
+            # 音频块上,vocoder 收尾语义与整 phrase 一次提交完全一致。
+            for codec_tokens, is_last in emissions:
+                if self.runtime.active_tag != tag:
+                    return decision
+                code2wav_inputs = self.runtime.submit_stage_output(
+                    tag,
+                    StageId.TALKER,
+                    codec_tokens,
+                    final=condition.end_of_turn and is_last,
+                )
+                for code2wav_input in code2wav_inputs:
+                    self.talker_to_code2wav.put_nowait(code2wav_input)
+                self._synthesize(tag, self._drain(self.talker_to_code2wav))
         return decision
 
     @staticmethod
