@@ -28,7 +28,10 @@ import torch.nn.functional as F
 @dataclasses.dataclass
 class DuplexParams:
     temperature: float = 0.7
-    top_k: int = 100  # 与官方建模 streaming_generate 默认一致(demo 配置用 20)
+    # 官方双工数据面实参:vllm-omni adapter stage0 = 20(StreamDecoder.decode
+    # 默认亦 20;streaming_generate 签名的 100 只是占位默认)。top_k=100 宽采样
+    # 使 turn_eos 过早进入候选池,实机表现为"一句话没说完就结束"。
+    top_k: int = 20
     top_p: float = 0.8
     text_repetition_penalty: float = 1.05
     text_repetition_window_size: int = 512
