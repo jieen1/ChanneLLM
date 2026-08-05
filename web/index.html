@@ -231,7 +231,8 @@ async function start() {
         log(`声纹录入失败: ${msg.reason}`, "ev-warn");
       } else if (msg.type === "gate") {
         const label = { open: "声纹确认,放行你的语音", muted: "声纹过滤:环境音被拦截",
-                        dropped: "短促声音未及确认,已忽略" }[msg.state] || msg.state;
+                        dropped: "短促声音未及确认,已忽略",
+                        fallback: "长语音兜底放行" }[msg.state] || msg.state;
         log(label, msg.state === "muted" ? "ev-warn" : "ev-info");
       }
       return;

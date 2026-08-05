@@ -29,23 +29,31 @@ def _silence(n: int = _FRAME) -> np.ndarray:
     return np.zeros(n, dtype=np.float32)
 
 
-class FakeEmbedder:
-    """verdict=True 返回与声纹同向的嵌入,否则返回反向。"""
+PRINT_EMB = np.ones(4, dtype=np.float32) / 2.0  # L2 归一化声纹
+_ORTHO = np.array([0.5, -0.5, 0.5, -0.5], dtype=np.float32)  # 与 PRINT_EMB 正交
 
-    def __init__(self, verdict: bool = True) -> None:
+
+class FakeEmbedder:
+    """verdict=True/False 返回同向/反向嵌入;sim= 返回精确相似度的嵌入。"""
+
+    def __init__(self, verdict: bool = True, sim: float | None = None) -> None:
         self.verdict = verdict
+        self.sim = sim
         self.calls: list[int] = []
 
     def embedding(self, segment: np.ndarray) -> np.ndarray:
         self.calls.append(segment.size)
+        if self.sim is not None:
+            s = float(self.sim)
+            vec = s * PRINT_EMB + float(np.sqrt(max(0.0, 1 - s * s))) * _ORTHO
+            return vec.astype(np.float32)
         vec = np.ones(4, dtype=np.float32) if self.verdict else -np.ones(4, dtype=np.float32)
         return vec / np.linalg.norm(vec)
 
 
-def _gate(verdict: bool = True, **kw) -> tuple[SpeakerGate, FakeEmbedder]:
-    emb = FakeEmbedder(verdict)
-    print_emb = np.ones(4, dtype=np.float32) / 2.0
-    return SpeakerGate(emb, print_emb, **kw), emb
+def _gate(verdict: bool = True, sim: float | None = None, **kw):
+    emb = FakeEmbedder(verdict, sim=sim)
+    return SpeakerGate(emb, PRINT_EMB, **kw), emb
 
 
 def test_passthrough_without_voiceprint() -> None:
@@ -69,17 +77,16 @@ def test_passthrough_when_reply_inactive() -> None:
 
 
 def test_matching_speaker_holds_then_flushes_intact() -> None:
-    gate, emb = _gate()  # confirm 默认 0.3s = 3 帧
-    held = [_voiced(value=v) for v in (0.1, 0.2, 0.3, 0.4, 0.5)]
+    gate, emb = _gate()  # confirm 默认 0.5s = 5 帧
+    held = [_voiced(value=0.1 + i * 0.01) for i in range(7)]
     outs = [gate.feed(f, reply_active=True) for f in held]
-    # 前 2 帧扣留(空输出),第 3 帧判定通过并冲刷全部扣留音频
-    assert outs[0].size == 0 and outs[1].size == 0
-    np.testing.assert_array_equal(outs[2], np.concatenate(held[:3]))
+    for i in range(4):
+        assert outs[i].size == 0  # 前 4 帧扣留
+    np.testing.assert_array_equal(outs[4], np.concatenate(held[:5]))
     assert gate.event == "open" and gate.state == "open"
-    # 之后直通,话语后续样本零延迟
-    np.testing.assert_array_equal(outs[3], held[3])
-    np.testing.assert_array_equal(outs[4], held[4])
-    assert emb.calls == [3 * _FRAME]  # 只算了一次
+    np.testing.assert_array_equal(outs[5], held[5])  # 之后直通
+    np.testing.assert_array_equal(outs[6], held[6])
+    assert emb.calls == [5 * _FRAME]  # 只算了一次
 
 
 def test_mismatched_speaker_held_then_dropped_with_rechecks() -> None:
@@ -89,8 +96,8 @@ def test_mismatched_speaker_held_then_dropped_with_rechecks() -> None:
         out = gate.feed(_voiced(), reply_active=True)
         assert out.size == 0  # 全程扣留,模型听不到噪声说话人
     assert gate.event == "muted" and gate.state == "muted"
-    # 0.3s 首判 + 每 0.5s 复核,3.0s 到顶后不再计算:3,8,13,18,23,28,33 帧 → 7 次
-    assert len(emb.calls) == 7
+    # 0.5s 首判 + 每 0.5s 复核,3.0s 到顶 exhausted:帧 5,10,15,20,25,30 → 6 次
+    assert len(emb.calls) == 6
     gate.feed(_silence(n=9 * _FRAME), reply_active=True)  # 长静默结束 episode
     assert gate.state == "idle"
 
@@ -106,7 +113,7 @@ def test_short_episode_dropped_without_embedding_call() -> None:
 
 def test_short_gap_keeps_episode_open_long_gap_rearms() -> None:
     gate, emb = _gate()
-    for _ in range(3):
+    for _ in range(5):
         gate.feed(_voiced(), reply_active=True)
     assert gate.state == "open"
     # 短间隙(< episode_gap 0.9s):episode 延续,保持直通
@@ -289,11 +296,20 @@ def test_gate_survives_pcm16_quantization_holes() -> None:
     assert out.size == seg.size  # 冲刷全部
 
 
-def test_fallback_opens_long_rejected_episode() -> None:
-    """被拒 episode 累积满 fallback_open_s 无条件放行(防阈值失准静音主人)。"""
-    gate, emb = _gate(verdict=False, fallback_open_s=1.8)
+def test_fallback_opens_borderline_long_episode() -> None:
+    """边界失准(相似度接近阈值)的长 episode 兜底放行,防静音主人。"""
+    gate, emb = _gate(sim=0.22, threshold=0.35, fallback_open_s=1.8)
     forwarded = 0
     for _ in range(20):  # 2s 连续语音
         forwarded += gate.feed(_voiced(), reply_active=True).size
-    assert gate.event in ("open", "fallback") and gate.state == "open"
+    assert gate.event == "fallback" and gate.state == "open"
     assert forwarded == int(2.0 * SAMPLING_RATE)  # 全部扣留音频冲刷
+
+
+def test_no_fallback_for_clear_stranger() -> None:
+    """明显异人(相似度远低于阈值)即使连续长说也不兜底放行。"""
+    gate, emb = _gate(verdict=False, fallback_open_s=1.8)
+    forwarded = 0
+    for _ in range(40):  # 4s 连续语音
+        forwarded += gate.feed(_voiced(), reply_active=True).size
+    assert gate.state == "muted" and forwarded == 0

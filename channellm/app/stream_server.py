@@ -46,7 +46,7 @@ VAD_SILENCE_MS = 450
 # 声纹门:只在模型回复播放中门控候选语音,防环境音 barge-in 打断回复。
 # 阈值来自实测分离度(campplus 同人不同段 ~0.6,人声 vs 噪声 ~0.05)。
 VOICEPRINT_THRESHOLD = 0.35
-VOICEPRINT_CONFIRM_S = 0.3     # 候选语音段挂起确认窗
+VOICEPRINT_CONFIRM_S = 0.5     # 候选语音段挂起确认窗(0.3s 嵌入方差过大)
 VOICEPRINT_MIN_ENROLL_S = 1.5  # 注册最少有效语音
 VOICEPRINT_MAX_ENROLL_S = 12.0  # 注册采集上限(防无界缓冲)
 VOICEPRINT_PATH = Path(__file__).resolve().parents[2] / "voiceprint.npy"
@@ -226,6 +226,7 @@ class VoiceSession:
         self._enroll_run_parts: list[np.ndarray] = []
         self._enroll_voiced_n = 0
         self._idle_chunks = 0
+        self._res_cursor = 0  # 回复文本增量下发的游标
         # Silero VAD 噪声门:加载失败自动降级能量阈值,不阻塞会话。
         try:
             from channellm.audio.vad import VoiceGate
@@ -272,6 +273,8 @@ class VoiceSession:
                     f"decision={decision.cost_decision_ms:.0f}ms",
                     flush=True,
                 )
+                if not decision.is_listen and decision.end_of_turn:
+                    self._publish_reply_text(tag)
             return decision
 
         self.driver.process_audio_chunk = logged_process
@@ -285,6 +288,7 @@ class VoiceSession:
         # 多回合:上一回复 finish_turn 后 active_tag 清空,持续输入必须进入
         # 新回合(顺带复位 talker/code2wav 流式状态),否则 submit_audio 全被拒。
         if self.queued.active_tag is None:
+            self._publish_reply_text(self.tag)  # 兜底:end_of_turn 路径未覆盖时
             self.tag = self.ingress.refresh_turn("ws-session")
             self.sink.post_turn(self.tag)
             if self._voice_gate is not None and not self._gate_speaking:
@@ -337,6 +341,17 @@ class VoiceSession:
                     f"(silence>={VAD_SILENCE_MS}ms)",
                     flush=True,
                 )
+
+    def _publish_reply_text(self, tag) -> None:
+        """把本回合模型说的话(增量)下发给客户端。"""
+        res_ids = self.session.res_ids
+        if len(res_ids) <= self._res_cursor:
+            return
+        tok = self.models.audio_front.tokenizer
+        text = tok.decode(res_ids[self._res_cursor:], skip_special_tokens=True).strip()
+        self._res_cursor = len(res_ids)
+        if text:
+            self.sink.post_reply(tag, text)
 
     def _force_listen(self, on: bool) -> None:
         """强制 duplex 决策为 listen(官方 force_listen_count 机制)。
@@ -391,7 +406,10 @@ class VoiceSession:
         gate = self._speaker_gate
         if gate is None or gate.print_emb is None:
             return gated
-        out = gate.feed(gated, reply_active=self._reply_active())
+        # 全程门控:注册后空闲期也拦截非目标说话人,环境音根本无法唤醒
+        # 模型(此前只门控回复播放期,空闲噪声仍会触发模型开口打断用户)。
+        # 代价:注册人每段语音首次放行延后 confirm_s(0.3s)。
+        out = gate.feed(gated, reply_active=True)
         event, gate.event = gate.event, None
         if event is not None:
             sim = gate.last_sim
@@ -466,15 +484,20 @@ class VoiceSession:
             self.sink.post_control({"type": "enroll_failed", "reason": "no_valid_segment"})
             print("[voiceprint] 注册失败:无有效语音段", flush=True)
             return
-        # 阈值校准:注册音频对半分,同人同麦克风同环境的相似度 self_sim 是
-        # 该设备的相似度上界;barge-in 时回声消除削波会使其下移,取
-        # self_sim-0.25(夹在 [0.15,0.35])作阈值,替代全局魔数。
-        half = len(full) // 2
-        e1 = self._voiceprint.embedder.embedding(full[:half])
-        e2 = self._voiceprint.embedder.embedding(full[half:])
-        if e1 is not None and e2 is not None:
-            self_sim = float(np.dot(e1, e2))
-            threshold = float(np.clip(self_sim - 0.25, 0.15, 0.35))
+        # 阈值校准:门判定用 0.5s 窗,校准必须同窗——把注册音频切成 0.5s
+        # 段求两两相似度(同人同麦同环境的该窗相似度分布),阈值取其均值
+        # -0.15(夹在 [0.12,0.35])。实测对半分 self_sim 比 0.5s 窗系统性
+        # 高 ~0.2,旧公式导致主人每句都要等 0.8s 复核才放行。
+        seg_n = int(0.5 * INPUT_SAMPLE_RATE)
+        segs = [full[i:i + seg_n] for i in range(0, len(full) - seg_n + 1, seg_n)]
+        embs = [e for e in map(self._voiceprint.embedder.embedding, segs) if e is not None]
+        sims = [
+            float(np.dot(embs[i], embs[j]))
+            for i in range(len(embs)) for j in range(i + 1, len(embs))
+        ]
+        if sims:
+            self_sim = float(np.mean(sims))
+            threshold = float(np.clip(self_sim - 0.15, 0.12, 0.35))
         else:
             self_sim, threshold = float("nan"), VOICEPRINT_THRESHOLD
         self._voiceprint.save(emb, threshold, self_sim)

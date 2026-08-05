@@ -166,7 +166,7 @@ class SpeakerGate:
         print_embedding: np.ndarray | None,
         *,
         threshold: float = 0.35,
-        confirm_s: float = 0.3,
+        confirm_s: float = 0.5,
         recheck_s: float = 0.5,
         max_verify_s: float = 3.0,
         episode_gap_s: float = 0.9,
@@ -182,6 +182,7 @@ class SpeakerGate:
         self._fallback_n = int(fallback_open_s * SAMPLING_RATE)
         self.event: str | None = None
         self.last_sim: float | None = None
+        self._max_sim: float | None = None  # episode 内最高相似度(兜底判据)
         self.state = "idle"
         self._run: list[np.ndarray] = []
         self._run_n = 0
@@ -264,11 +265,18 @@ class SpeakerGate:
         emb = self.embedder.embedding(full)
         sim = float(np.dot(emb, self.print_emb)) if emb is not None else None  # type: ignore[arg-type]
         self.last_sim = sim
+        if sim is not None:
+            self._max_sim = sim if self._max_sim is None else max(self._max_sim, sim)
         if sim is not None and sim >= self.threshold:
             self.state, self.event = "open", "open"
             self._run = []
             return full
-        if self._run_n >= self._fallback_n:
+        # 兜底仅限"边界失准"(最高相似度接近阈值):明显异人(sim 远低于
+        # 阈值)连续说话也不放行,否则任何陌生人说 1.8s 都能突破。
+        borderline = (
+            self._max_sim is not None and self._max_sim >= self.threshold - 0.15 - 1e-6
+        )
+        if self._run_n >= self._fallback_n and borderline:
             self.state, self.event = "open", "fallback"
             self._run = []
             return full
@@ -286,3 +294,4 @@ class SpeakerGate:
         self._run = []
         self._run_n = 0
         self._exhausted = False
+        self._max_sim = None

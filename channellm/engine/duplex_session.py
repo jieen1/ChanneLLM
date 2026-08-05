@@ -114,7 +114,10 @@ class DuplexSession:
         self._generate_count = 0
 
     @torch.no_grad()
-    def prepare(self, system_prompt="Streaming Omni Conversation."):
+    def prepare(self, system_prompt="你是一个友好的助手。"):
+        # 官方部署 demo(MiniCPM-o-Demo unified.py)实参;"Streaming Omni
+        # Conversation." 只是 modeling 占位默认,实测冷会话首问只得 ~1s 短
+        # 回复,助手人格提示下首轮即完整作答。
         tok = self.audio_front.tokenizer
         im_start = tok.convert_tokens_to_ids("<|im_start|>")
         im_end = tok.convert_tokens_to_ids("<|im_end|>")
@@ -218,6 +221,10 @@ class DuplexSession:
                 first_token_decoded_ns = time.monotonic_ns()
             is_listen = token == self.listen_id
             if token in self.chunk_terminator_ids:
+                # 官方 explicit 模式:终止 token(listen/chunk_eos)必须喂回
+                # 上下文,否则每个 LISTEN 块的 <listen> 缺失,会话上下文
+                # 结构持续偏离训练分布,决策质量退化(回复短碎/不稳)。
+                self._feed_token(token)
                 break
             self.current_turn_ended = False
             if token != self.speak_id:
